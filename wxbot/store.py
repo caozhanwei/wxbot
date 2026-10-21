@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS mined(
     question TEXT, answer TEXT);
 CREATE TABLE IF NOT EXISTS mined_seq(
     chat TEXT PRIMARY KEY, seq INTEGER, ts REAL);
+CREATE TABLE IF NOT EXISTS kb_sink(
+    chat TEXT PRIMARY KEY, seq INTEGER, ts REAL);
 """
 
 
@@ -109,6 +111,19 @@ class Store:
     def set_mined_seq(self, chat, seq):
         with self._lock, self._conn() as c:
             c.execute("INSERT INTO mined_seq(chat,seq,ts) VALUES(?,?,?) "
+                      "ON CONFLICT(chat) DO UPDATE SET seq=excluded.seq, ts=excluded.ts",
+                      (chat, seq, time.time()))
+
+    # ---------- KB 沉淀水位 ----------
+    def get_kb_seq(self, chat):
+        with self._conn() as c:
+            row = c.execute("SELECT seq FROM kb_sink WHERE chat=?",
+                            (chat,)).fetchone()
+            return row["seq"] if row else 0
+
+    def set_kb_seq(self, chat, seq):
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO kb_sink(chat,seq,ts) VALUES(?,?,?) "
                       "ON CONFLICT(chat) DO UPDATE SET seq=excluded.seq, ts=excluded.ts",
                       (chat, seq, time.time()))
 

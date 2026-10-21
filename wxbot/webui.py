@@ -189,6 +189,12 @@ filterRecent('');
     <span class="muted">@机器人提问触发；自动挖历史=定时把群聊增量抽成问答</span>
   </div>
   <div class="row">
+    <label>免@接话</label><input type="checkbox" name="no_at_reply" {{ 'checked' if g.no_at_reply }}>
+    <label>上下文条数</label><input type="number" name="no_at_context" value="{{ g.no_at_context or 20 }}" min="5" max="60" style="width:60px">
+    <label>冷却(分)</label><input type="number" name="no_at_cooldown_min" value="{{ g.no_at_cooldown_min or 3 }}" step="0.5" min="0" style="width:60px">
+    <span class="muted">没人@机器人也按最近聊天判断是否接话：先脱敏沉淀进知识库再作答；冷却内不重复接话，@提问不受限</span>
+  </div>
+  <div class="row">
     <label>进群欢迎</label><input type="checkbox" name="welcome" {{ 'checked' if (g.manage or {}).get('welcome') }}>
     <input type="text" name="welcome_text" value="{{ (g.manage or {}).get('welcome_text') or '' }}" style="flex:1" placeholder="欢迎 {name} 入群！…（{name}=新人昵称）">
   </div>
@@ -330,6 +336,7 @@ def start_web(bot):
         inner = getattr(bot, "_bot", None) or bot
         try:
             inner._kb = None
+            inner._kb_writer = None
         except AttributeError:
             pass
         if getattr(bot, "build_watch", None):
@@ -524,11 +531,22 @@ def start_web(bot):
                        "warn_persona": f.get("warn_persona") or "群管家-热心",
                        "warn_threshold": int(f.get("warn_threshold") or 2)},
         }
+        data["no_at_reply"] = bool(f.get("no_at_reply"))
+        for key, cast in (("no_at_context", int), ("no_at_cooldown_min", float)):
+            raw = (f.get(key) or "").strip()
+            if raw:
+                try:
+                    data[key] = cast(raw)
+                except ValueError:
+                    pass
         if idx < 0:
             groups.append(data)
         elif idx < len(groups):
             old = groups[idx]
             data["manage"]["mention_names"] = (old.get("manage") or {}).get("mention_names") or []
+            for key in ("no_at_context", "no_at_cooldown_min"):
+                if key not in data and old.get(key) is not None:
+                    data[key] = old[key]
             groups[idx] = data
         _persist()
         return redirect("/")
@@ -549,6 +567,7 @@ def start_web(bot):
                 return redirect("/")
             items.append({"id": cid, "display": display, "enabled": True,
                           "persona": "群管家-热心", "mine": False,
+                          "no_at_reply": False,
                           "qa": {"enabled": True, "grounded_reply": True, "llm_fallback": False},
                           "manage": {"welcome": True,
                                      "welcome_text": "欢迎 {name} 入群！有问题可以直接 @我 提问～",

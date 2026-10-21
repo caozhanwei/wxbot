@@ -53,6 +53,24 @@ class PersonaEngine:
         raw = self.llm.chat(system, user, temperature=temp)
         return _sanitize(raw)
 
+    def context_reply(self, persona_name, group, context_lines, kb_ref=""):
+        """免@主动接话：没被@时按群聊上下文自然回复，可并入知识库参考。"""
+        p = self.cfg.persona(persona_name)
+        system = (f'你是微信群"{group}"里的助手。说话风格：{p.get("style")}。'
+                  f'背景：{p.get("background") or "帮群友答疑的技术助手"}。'
+                  "你没有被@，是看到群里有值得帮忙的话题顺带接一句。"
+                  "只输出一条可直接发送的微信群文本：不要@任何人、不要解释、"
+                  "不要引号、不要markdown，不超过 120 字；"
+                  "没把握就直说不确定，别编造。")
+        user = "群里最近的对话：\n" + "\n".join(context_lines)
+        if kb_ref:
+            user += ("\n\n知识库检索到的参考资料（可信时优先依据，与对话无关就忽略）：\n"
+                     + kb_ref[:1200])
+        user += "\n\n请生成你要发出的接话："
+        temp = float(self.cfg.llm_cfg.get("temperature", 0.8))
+        raw = self.llm.chat(system, user, temperature=temp)
+        return _sanitize(raw)
+
     def warn_message(self, persona_name, member, word, nth, threshold):
         """违禁词劝告话术。"""
         p = self.cfg.persona(persona_name)

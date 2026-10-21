@@ -14,13 +14,14 @@ python run_bot.py --check                # 自检：窗口/自身/LLM/KB 连通
 python run_bot.py --list                 # 列出最近会话与群 id（用于填配置）
 python run_bot.py --test-reply 文件传输助手 你好   # 全链路测试（请先用文件传输助手）
 python run_bot.py                        # 启动（含 Web 状态页 http://127.0.0.1:8778）
-python -m pytest tests/ -q               # 46 个用例
+python -m pytest tests/ -q               # 66 个用例
 ```
 
 ## 能力
 
 - **私聊自动回复（白名单制）**：`bot_config.yaml` 的 `contacts` 里 `enabled: true` 的联系人才会 AI 回复；每个联系人可指定 `persona`（人设库自定义，语气/背景/表情习惯）
 - **群答疑**：群内 `@机器人 + 问题` → 团队知识库（MCP `kb_ask`）RAG 回答；未正中但有引用来源 → 附参考回复并记入"待沉淀"（Web 页可见）；完全未命中 → 记录并私信管理员
+- **免@上下文回复**（v1.3.2）：群配置 `no_at_reply` 打开后，没人@机器人也会结合最近聊天判断——先把增量消息（脱敏后）沉淀进知识库，再由 LLM 判定"值得接话"（有人提问/求资源/讨论可答话题）才回复（回复 prompt 并入知识库检索参考；纯闲聊不吭声）；同群冷却默认 3 分钟可配，@提问不受冷却限制
 - **群管理**：进群欢迎（模板）、违禁词监控 → 按人设生成劝告话术 → 达阈值私信管理员建议移出（**踢人需人工在微信操作**，避免误伤）
 - **管理员命令**：私聊发 `#状态 #暂停 #恢复 #开 <名> #关 <名> #重载 #待审 #帮助`
 - **Web 状态页**（127.0.0.1:8778）：联系人/群开关、运行统计、日志、待沉淀问题、在线编辑配置（热重载；网页保存会丢注释，介意请直接编辑文件）
@@ -34,7 +35,7 @@ python -m pytest tests/ -q               # 46 个用例
 - `llm`：人设对话生成（provider/base_url/api_key/model/temperature/timeout 均可配）
 - `kb`：群答疑知识库（MCP 网关，需自行部署或填写可用网关；未配置时私聊功能不受影响）
 - `contacts`：`id`（微信号/wxid，不知道可只填 `display` 自动反查；更推荐直接从 Web 页"最近会话"点选）+ `persona` + `enabled`
-- `groups`：`--list` 查 id 或 Web 页点选；`qa.enabled` 答疑开关；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
+- `groups`：`--list` 查 id 或 Web 页点选；`qa.enabled` 答疑开关；`no_at_reply` 免@接话（`no_at_context`/`no_at_cooldown_min` 可调，Web 页群卡片有开关）；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
 - `app.dry_run: true` 只记日志不发送（**模板默认开**，新装机先在演示模式验证）
 - `app.self_wxid` / `app.setup_done`：程序自动维护（多账号隔离标识/向导完成标志），勿手改
 
@@ -51,7 +52,7 @@ python -m pytest tests/ -q               # 46 个用例
 - 踢人未做全自动（4.x 群设置 UI 自动化误踢风险高），走"人设劝告 + 阈值告警 + 人工移出"
 - @提醒通知依赖文本匹配（群昵称与微信昵称不一致时需在 `mention_names` 补充）
 - 群内 @某人 仅文本显示，不含微信官方 @ 通知效果
-- `kb` 网关无上传 API，待沉淀问题走 Web 页复制 → 人工导入知识库
+- `kb` 网关上传依赖其 MCP 工具（默认 `kb_upload` → `kb_add_document` → `kb_add_file` 顺序试探，可用 `kb.upload_tool` 指定）；不可用时免@沉淀静默跳过（本地水位不前移，待下次重试），待沉淀问题仍可走 Web 页复制 → 人工导入
 
 ## 目录
 

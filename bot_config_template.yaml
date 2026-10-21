@@ -18,6 +18,7 @@ kb:                              # 知识库（可选）：群 @机器人 答疑
   url: https://your-kb-gateway.example/mcp
   api_key: your-kb-api-key
   kb: team
+  # upload_tool: kb_upload    # 免@消息沉淀的上传工具名（可选；默认 kb_upload → kb_add_document → kb_add_file 顺序试探）
   top_k: 5
   timeout: 60
   miss_markers:
@@ -67,6 +68,9 @@ groups:
   persona: 老友幽默
   mention_names: []
   mine: false                  # 自动增量挖掘群历史 → 网页"挖掘"区查看/导出
+  no_at_reply: false           # 免@接话：没人@机器人时也按最近聊天判断是否主动回复（默认关）
+  no_at_context: 20            # 免@判断参考的最近消息条数（含触发消息，默认 20）
+  no_at_cooldown_min: 3        # 免@回复冷却分钟数（期间不重复接话；@提问不受限，默认 3）
   qa:
     enabled: true
     grounded_reply: true

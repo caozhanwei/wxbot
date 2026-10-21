@@ -338,3 +338,33 @@ def test_setup_done_flag(client):
     c.post("/setup/done", follow_redirects=True)
     assert _load(path)["app"]["setup_done"] is True
     assert "首次使用向导" not in c_get(client)
+
+
+# ---------- v1.3.2：免@接话开关 ----------
+def test_group_no_at_reply_toggle(client):
+    c, bot, path = client
+    c.post("/cfg/group", data={
+        "idx": "0", "do": "save", "enabled": "on", "display": "测试群",
+        "id": "111@chatroom", "persona": "老友幽默",
+        "qa_enabled": "on", "grounded": "on", "llm_fallback": "on",
+        "no_at_reply": "on", "no_at_context": "25", "no_at_cooldown_min": "5",
+        "welcome": "on", "welcome_text": "欢迎 {name}",
+        "forbidden": "广告", "warn_persona": "老友幽默", "warn_threshold": "2",
+    }, follow_redirects=True)
+    g = _load(path)["groups"][0]
+    assert g["no_at_reply"] is True
+    assert g["no_at_context"] == 25
+    assert g["no_at_cooldown_min"] == 5.0
+    body = c.get("/").data.decode("utf-8")
+    assert "免@接话" in body and 'name="no_at_reply"' in body
+    # 不勾开关（数值留空）→ 关闭，且保留已存的数值字段
+    c.post("/cfg/group", data={
+        "idx": "0", "do": "save", "enabled": "on", "display": "测试群",
+        "id": "111@chatroom", "persona": "老友幽默",
+        "qa_enabled": "on", "welcome": "on", "welcome_text": "欢迎 {name}",
+        "forbidden": "广告", "warn_persona": "老友幽默", "warn_threshold": "2",
+        "no_at_context": "", "no_at_cooldown_min": "",
+    }, follow_redirects=True)
+    g = _load(path)["groups"][0]
+    assert g["no_at_reply"] is False
+    assert g["no_at_context"] == 25

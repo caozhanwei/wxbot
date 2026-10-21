@@ -7,12 +7,31 @@ import time
 from answer import McpKBClient, KBError
 
 from . import group_logic, paths
+from .kb import KBGateway
 from .config import BotConfig
 from .driver import WxDriver
 from .personas import PersonaEngine
 from .store import Store
 
 log = logging.getLogger("wxbot")
+
+_KB_SINK_MAX = 200       # 免@沉淀单次上传的最大消息条数（积压再多只保留最近这些）
+
+_NO_AT_JUDGE = (
+    "你是微信群助手的决策器，判断在没有被@的情况下是否值得主动接话。"
+    '只输出 JSON：{"reply": true或false, "reason": "不超过20字的原因"}。'
+    "reply=true：最近对话里有人明确提出问题、求助、求资源/文档，"
+    "或正在讨论助手知识库能回答的技术/业务话题；"
+    "reply=false：纯闲聊灌水、寒暄玩笑、表情刷屏、八卦、与知识无关，"
+    "或最后一条是机器人自己说的话。拿不准一律 false——宁可少说不刷屏。"
+)
+
+
+def _num(v, default):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 class Bot:
@@ -23,6 +42,7 @@ class Bot:
         self.driver = driver or WxDriver()
         self.personas = PersonaEngine(self.cfg)
         self._kb = None
+        self._kb_writer = None
         self.with_web = with_web
         # GUI 模式下与外壳共享同一对象，网页端看到的配置/暂停状态才是真实的
         self.state = state or {}
@@ -31,6 +51,7 @@ class Bot:
         self.state.setdefault("start", time.time())
         self.state.setdefault("kb_fail_ts", 0)
         self.state.setdefault("fails", {})
+        self.state.setdefault("no_at_last", {})
         self.watch = []
 
     # ---------- 基础 ----------
@@ -39,6 +60,13 @@ class Bot:
         if self._kb is None:
             self._kb = McpKBClient({"mcp": self.cfg.kb_cfg})
         return self._kb
+
+    @property
+    def kb_writer(self):
+        """知识库写入端（免@消息沉淀用），与读端同源配置。"""
+        if self._kb_writer is None:
+            self._kb_writer = KBGateway({"mcp": self.cfg.kb_cfg})
+        return self._kb_writer
 
     def build_watch(self):
         """按当前配置重建监控列表（热重载后调用，保留各会话水位）。"""
@@ -97,6 +125,7 @@ class Bot:
             if self.cfg.maybe_reload():
                 self.personas.refresh()
                 self._kb = None
+                self._kb_writer = None
                 self.build_watch()
                 log.info("配置已热重载")
             if max_runtime and time.time() - self.state["start"] > max_runtime:
@@ -208,11 +237,19 @@ class Bot:
             if self.state["paused"]:
                 continue
             if qa.get("enabled") and group_logic.at_bot(m["content"], names):
-                self._group_qa(w, m)
-            elif mg.get("forbidden_words"):
+                self._group_qa(w, m)      # @机器人：原有答疑链路，不受免@冷却限制
+                continue
+            word = None
+            if mg.get("forbidden_words"):
                 word = group_logic.forbidden_hit(m["content"], mg["forbidden_words"])
                 if word:
                     self._warn(w, m, word)
+                    continue
+            if g.get("no_at_reply"):
+                try:
+                    self._no_at_reply(w, m)
+                except Exception as e:
+                    log.exception("免@回复异常(%s): %s", w["display"], e)
 
     def _welcome(self, w, name):
         text = ((w["cfg"].get("manage") or {}).get("welcome_text")
@@ -270,6 +307,93 @@ class Bot:
                                f"（{word}），建议移出群（需在微信中人工操作）")
             self.store.audit("bot", "warn_escalated", f"{w['display']} {member} {word}")
 
+    # ---------- 免@上下文回复 ----------
+    def _no_at_reply(self, w, m):
+        """群里没人@机器人时，按最近上下文判断要不要接话（仅 no_at_reply 打开的群）。
+
+        链路：冷却检查 → 增量沉淀进知识库 → LLM 判定值不值得接话 →
+        带 KB 检索参考生成回复。任何一步失败都只记日志，不影响主循环；
+        dry_run 时照常判断，由 send() 只记日志不发送。
+        """
+        g = w["cfg"]
+        rc = self.cfg.reply_cfg
+        cooldown = 60.0 * _num(g.get("no_at_cooldown_min") or rc.get("no_at_cooldown_min"), 3)
+        marks = self.state.setdefault("no_at_last", {})
+        if time.time() - marks.get(w["user"], 0) < cooldown:
+            return
+        try:
+            context = self.driver.build_context(
+                w["user"], int(g.get("no_at_context") or rc.get("no_at_context") or 20))
+        except Exception as e:
+            log.warning("免@读取上下文失败(%s): %s", w["display"], e)
+            return
+        if not context:
+            return
+        self._sink_to_kb(w)
+        if not self._judge_no_at(w, context):
+            return
+        reply = self._no_at_answer(w, context)
+        if not reply:
+            return
+        if self.send(w["display"], reply, "no_at"):
+            marks[w["user"]] = time.time()
+
+    def _sink_to_kb(self, w):
+        """把上次水位线之后的新群消息（_SENSITIVE 过滤后）上传知识库；失败静默降级。"""
+        from . import mining
+        gid, gname = w["user"], w["display"]
+        try:
+            since = self.store.get_kb_seq(gid)
+            if since:
+                rows = mining._fetch_history(self.driver, gid, since)
+            else:  # 首次沉淀：不回翻全量历史，只带最近一段
+                rows = sorted(self.driver.db.get_messages(gid, limit=_KB_SINK_MAX),
+                              key=lambda r: r["sort_seq"])
+            lines = mining._normalize(self.driver, rows)
+            if not lines:
+                return
+            if len(lines) > _KB_SINK_MAX:
+                log.info("KB 沉淀积压 %d 条，只保留最近 %d 条", len(lines), _KB_SINK_MAX)
+                lines = lines[-_KB_SINK_MAX:]
+            title = f"{gname} 聊天沉淀 {time.strftime('%Y%m%d_%H%M')}"
+            md = ["# " + title, "", f"来源群：{gname}", ""]
+            md += ["- " + t["line"] for t in lines]
+            self.kb_writer.upload_markdown(title, "\n".join(md))
+            self.store.set_kb_seq(gid, lines[-1]["seq"])
+            log.info("KB 沉淀 %s：%d 条", gname, len(lines))
+        except Exception as e:      # KBError 及其他：KB 挂了绝不阻断回复
+            log.warning("KB 沉淀失败(%s)，跳过待下次重试: %s", gname, e)
+
+    def _judge_no_at(self, w, context):
+        """LLM 判定这段对话是否值得机器人接话；失败视为不值得（宁可沉默）。"""
+        try:
+            d = self.personas.llm.chat_json(
+                _NO_AT_JUDGE,
+                "群：" + w["display"] + "\n最近对话：\n"
+                + "\n".join(context[-12:]) + "\n\n判断：",
+                temperature=0.0)
+            ok = bool(d.get("reply"))
+            log.info("免@判定 %s → %s（%s）", w["display"],
+                     "接话" if ok else "沉默", d.get("reason", ""))
+            return ok
+        except Exception as e:
+            log.warning("免@判定失败(%s)，本次不接话: %s", w["display"], e)
+            return False
+
+    def _no_at_answer(self, w, context):
+        """生成免@回复，prompt 里并入知识库检索参考；检索失败就无参考作答。"""
+        ref = ""
+        try:
+            ref = self.kb.search("\n".join(context[-5:]), top_k=3)
+        except Exception as e:
+            log.warning("KB 检索失败(%s)，本次无参考作答: %s", w["display"], e)
+        try:
+            return self.personas.context_reply(
+                w["cfg"].get("persona", "群管家-热心"), w["display"], context, ref)
+        except Exception as e:
+            log.warning("免@回复生成失败(%s): %s", w["display"], e)
+            return ""
+
     # ---------- 管理员命令 ----------
     def _admin_command(self, sender, content):
         cmd = content.strip().lstrip("#").split()
@@ -311,6 +435,7 @@ class Bot:
             self.cfg.reload()
             self.personas.refresh()
             self._kb = None
+            self._kb_writer = None
             self.build_watch()
             return "配置已重载"
         if name == "待审":
