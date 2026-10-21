@@ -75,14 +75,29 @@ class BotShell:
             self._bot = None
 
 
+def _keepalive():
+    """无窗口模式（浏览器回退）下占住主线程，守护线程里的 Bot 才不会跟着退出。"""
+    while True:
+        time.sleep(60)
+
+
 def run_gui(cfg_path=None):
     cfg_path = cfg_path or paths.default_config()
     shell = BotShell(cfg_path)
     webui.start_web(shell)
     shell.restart()
 
-    import webview
-    webview.create_window("微信智能助手", f"http://127.0.0.1:{shell.cfg.web_port}",
+    url = f"http://127.0.0.1:{shell.cfg.web_port}"
+    try:
+        import webview
+    except ImportError:
+        # pywebview 未安装/未随包（CI 最小依赖打包）→ 退回默认浏览器，功能一致
+        import webbrowser
+        log.info("pywebview 不可用，用默认浏览器打开 %s", url)
+        webbrowser.open(url)
+        _keepalive()
+        return
+    webview.create_window("微信智能助手", url,
                           width=1100, height=800, min_size=(860, 600))
     webview.start()
     log.info("窗口关闭，退出")
