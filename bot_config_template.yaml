@@ -1,17 +1,22 @@
+# 微信智能助手配置（随安装包分发的模板，不含任何真实密钥）
+# 首次启动网页会出"首次使用向导"引导填写；也可直接编辑本文件。
+# 多账号隔离：登录后配置/数据库自动放到 %APPDATA%\wxbot\<你的wxid>\，换微信号登录自动换一套，互不串号。
 app:
-  dry_run: false
+  dry_run: true                  # 演示模式：只记日志不真正发送（新装默认开，验证没问题再关！）
+  self_wxid: ""                  # 程序登录后自动写入（多账号隔离标识），勿手填
+  setup_done: false              # 首启向导完成标志，点"完成"后自动置 true
   web_port: 8778
   db_file: wxbot.db
-llm:
+llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
-  base_url: https://your-llm-gateway.example.com/v1
-  api_key: sk-your-llm-key
-  model: glm-5.3-flash
+  base_url: https://your-llm-gateway.example/v1
+  api_key: your-api-key
+  model: your-model
   temperature: 0.8
   timeout: 60
-kb:
-  url: https://your-kb-gateway.example.com/mcp
-  api_key: your-kb-key-hex
+kb:                              # 知识库（可选）：群 @机器人 答疑走它 RAG；不配则群答疑降级/关闭
+  url: https://your-kb-gateway.example/mcp
+  api_key: your-kb-api-key
   kb: team
   top_k: 5
   timeout: 60

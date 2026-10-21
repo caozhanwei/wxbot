@@ -41,11 +41,20 @@ groups:
 
 
 class FakeDriver:
-    """带群名反查的假 driver。"""
+    """带群名反查/最近会话/模糊搜索的假 driver。"""
 
     def __init__(self):
         self.groups = {"9@chatroom": "🎈🏠测试小区群"}
         self.self_name = "测试号"
+        self.chats = [{"id": "wxid_lin", "display": "林昆", "is_group": False},
+                      {"id": "wxid_cai", "display": "蔡玉丽", "is_group": False},
+                      {"id": "9@chatroom", "display": "🎈🏠测试小区群", "is_group": True}]
+
+    def resolve_id(self, display):
+        for r in self.chats:
+            if not r["is_group"] and r["display"] == display:
+                return r["id"]
+        return ""
 
     def resolve_group_id(self, display):
         key = (display or "").strip().replace(" ", "")
@@ -53,6 +62,14 @@ class FakeDriver:
             if key == n or key in n:
                 return u, n
         return None
+
+    def list_recent_chats(self, limit=60):
+        return self.chats[:limit]
+
+    def search_chats(self, q, limit=12):
+        q = (q or "").replace(" ", "").lower()
+        return [r for r in self.chats
+                if q in (r["display"] + r["id"]).replace(" ", "").lower()][:limit]
 
 
 class StubBot:
@@ -237,3 +254,87 @@ def test_yaml_roundtrip(client):
     r = c.post("/config", data={"cfg": new_yaml}, follow_redirects=True)
     assert r.status_code == 200
     assert _load(path)["personas"]["x"]["style"] == "s"
+
+
+# ---------- v1.3.0：最近会话选择器 / 一键添加 / 首启向导 ----------
+def test_recent_card_renders(client):
+    c, bot, path = client
+    body = c.get("/").data.decode("utf-8")
+    for s in ("最近会话", "林昆", "蔡玉丽", "测试小区群", "wxid_lin"):
+        assert s in body, f"页面缺少 {s}"
+    # 已配置的会话（111@chatroom 不在假会话里；wxid_1 张三也不在）——检查候选行结构即可
+    assert "/cfg/pick" in body and "加为联系人" in body and "加为群" in body
+
+
+def test_wizard_hidden_by_default(client):
+    """老配置没有 setup_done 标志 → 不显示向导（升级用户无感）。"""
+    body = c_get(client)
+    assert "首次使用向导" not in body
+
+
+def c_get(client):
+    c, bot, path = client
+    return c.get("/").data.decode("utf-8")
+
+
+def test_pick_adds_contact_and_group(client):
+    c, bot, path = client
+    c.post("/cfg/pick", data={"id": "wxid_lin", "display": "林昆", "kind": "contact"},
+           follow_redirects=True)
+    c.post("/cfg/pick", data={"id": "9@chatroom", "display": "🎈🏠测试小区群",
+                              "kind": "group"}, follow_redirects=True)
+    data = _load(path)
+    assert any(x["display"] == "林昆" and x["enabled"] for x in data["contacts"])
+    g = [x for x in data["groups"] if x["id"] == "9@chatroom"]
+    assert g and g[0]["enabled"] is True and g[0]["qa"]["enabled"] is True
+    # 重复添加 → 不新增
+    n = len(data["groups"])
+    c.post("/cfg/pick", data={"id": "9@chatroom", "display": "测试小区群", "kind": "group"},
+           follow_redirects=True)
+    assert len(_load(path)["groups"]) == n
+
+
+def test_pick_rejects_missing_fields(client):
+    c, bot, path = client
+    r = c.post("/cfg/pick", data={"id": "", "display": ""})
+    assert "参数错误" in r.data.decode("utf-8")
+
+
+def test_contact_unknown_name_offers_candidates(client):
+    c, bot, path = client
+    r = c.post("/cfg/contact", data={"action": "new", "display": "林"})
+    body = r.data.decode("utf-8")
+    assert "反查不到 林" in body and "wxid_lin" in body      # 候选按钮出现在错误卡
+
+
+def test_api_sessions(client):
+    c, bot, path = client
+    r = c.get("/api/sessions?q=小区")
+    d = r.get_json()
+    assert d["ok"] and len(d["sessions"]) == 1 and d["sessions"][0]["id"] == "9@chatroom"
+    r = c.get("/api/sessions")
+    assert len(r.get_json()["sessions"]) == 3
+
+
+def test_setup_llm_saves_and_rejects_placeholders(client):
+    c, bot, path = client
+    r = c.post("/setup/llm", data={"base_url": "https://your-llm-gateway.example/v1",
+                                   "api_key": "k", "model": "m"})
+    assert "真实值" in r.data.decode("utf-8")
+    c.post("/setup/llm", data={"base_url": "http://real/v1", "api_key": "sk-1",
+                               "model": "g-x"}, follow_redirects=True)
+    llm = _load(path)["llm"]
+    assert llm["base_url"] == "http://real/v1" and llm["api_key"] == "sk-1"
+    c.post("/setup/llm", data={"kb_url": "http://kb/mcp", "kb_key": "hk"},
+           follow_redirects=True)
+    kb = _load(path)["kb"]
+    assert kb["url"] == "http://kb/mcp" and kb["api_key"] == "hk"
+
+
+def test_setup_done_flag(client):
+    c, bot, path = client
+    bot.cfg.data.setdefault("app", {})["setup_done"] = False
+    assert "首次使用向导" in c_get(client)
+    c.post("/setup/done", follow_redirects=True)
+    assert _load(path)["app"]["setup_done"] is True
+    assert "首次使用向导" not in c_get(client)

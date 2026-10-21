@@ -8,7 +8,7 @@ hiddenimports += collect_submodules('wechatauto')
 a = Analysis(
     ['run_bot.py'],
     pathex=['vendor/wechatauto-replica'],
-    binaries=[],
+    binaries=[('build/redist/mfc140u.dll', '.'), ('build/redist/msvcp140.dll', '.')],
     datas=[('bot_config_template.yaml', '.')],
     hiddenimports=hiddenimports,
     hookspath=[],

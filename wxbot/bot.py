@@ -16,10 +16,11 @@ log = logging.getLogger("wxbot")
 
 
 class Bot:
-    def __init__(self, cfg_path="bot_config.yaml", with_web=True, cfg=None, state=None):
+    def __init__(self, cfg_path="bot_config.yaml", with_web=True, cfg=None, state=None,
+                 driver=None):
         self.cfg = cfg or BotConfig(cfg_path)
         self.store = Store(paths.resolve(self.cfg.db_file))
-        self.driver = WxDriver()
+        self.driver = driver or WxDriver()
         self.personas = PersonaEngine(self.cfg)
         self._kb = None
         self.with_web = with_web

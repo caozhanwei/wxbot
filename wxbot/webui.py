@@ -12,8 +12,8 @@ from . import mining
 
 log = logging.getLogger("wxbot.web")
 
-_NAV = [("状态", "#top"), ("联系人", "#contacts"), ("人设", "#personas"),
-        ("群", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
+_NAV = [("状态", "#top"), ("最近会话", "#recent"), ("联系人", "#contacts"),
+        ("人设", "#personas"), ("群", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
         ("日志", "#logs"), ("待沉淀", "#pending"), ("挖掘", "#mine"), ("YAML", "#yaml")]
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
@@ -45,7 +45,41 @@ details summary{cursor:pointer;font-weight:bold;font-size:14px}
 <p class="muted">请确认微信 PC 版已登录且主窗口存在，然后点重试。</p></div>{% endif %}
 
 {% if flash %}<div class="card"><span class="ok">{{ flash }}</span></div>{% endif %}
-{% if form_error %}<div class="card"><span class="err">{{ form_error }}</span></div>{% endif %}
+{% if form_error %}<div class="card"><span class="err">{{ form_error }}</span>
+{% if candidates %}<p class="muted">最近会话里找到这些相似的，点一下直接加：</p>
+{% for r in candidates %}<form method="post" action="/cfg/pick" class="row">
+  <input type="hidden" name="id" value="{{ r.id }}">
+  <input type="hidden" name="display" value="{{ r.display }}">
+  <input type="hidden" name="kind" value="{{ 'group' if r.is_group else 'contact' }}">
+  <b style="min-width:150px">{{ r.display }}</b>
+  <span class="muted" style="min-width:250px">{{ r.id }}{{ ' ·群' if r.is_group }}</span>
+  <button>加为{{ '群' if r.is_group else '联系人' }}</button>
+</form>{% endfor %}{% endif %}
+</div>{% endif %}
+
+{% if not setup_done %}<div class="card" style="border-color:#e8a33d;background:#fffbe8">
+<h2>🚀 首次使用向导</h2>
+<ol style="margin:6px 0 10px;font-size:13px">
+  <li>确认微信 PC 版已登录（顶部状态显示：<b>{{ self_name }}</b>，不是"未连接"即可）</li>
+  <li>填模型接口（自动回复要靠它生成消息）：<b>地址 + API Key + 模型名</b> 三样都填好 → 保存</li>
+  <li>到下面的 <a href="#recent">最近会话</a> 卡片，搜索后点"加为联系人/加为群"，把要接管的会话加进来</li>
+</ol>
+<form method="post" action="/setup/llm" class="row">
+  <label>模型接口地址</label><input type="text" name="base_url" value="{{ llm.base_url or '' }}" style="min-width:280px" placeholder="https://your-llm-gateway.example/v1">
+  <label>API Key</label><input type="password" name="api_key" style="min-width:180px" placeholder="sk-…">
+  <label>模型名</label><input type="text" name="model" style="min-width:130px">
+  <button>保存模型设置</button>
+</form>
+<form method="post" action="/setup/llm" class="row">
+  <label>知识库地址（可选，群答疑用）</label><input type="text" name="kb_url" style="min-width:260px">
+  <label>知识库 Key（可选）</label><input type="text" name="kb_key" style="min-width:170px">
+  <button>保存知识库设置</button>
+</form>
+<form method="post" action="/setup/done" class="row">
+  <button>✔ 完成，进入控制台</button>
+  <span class="muted">当前为演示模式（只记日志不真正发送）；都配好后去"模型与节奏"把演示模式关掉才真正回复</span>
+</form>
+</div>{% endif %}
 
 <div class="card">
 <form method="post" class="row">
@@ -53,6 +87,42 @@ details summary{cursor:pointer;font-weight:bold;font-size:14px}
   <button formaction="/reload" formmethod="post">从文件重载配置</button>
   <span class="muted">所有保存操作立即生效（热重载）</span>
 </form></div>
+
+<a name="recent"></a><div class="card"><h2>最近会话（点开过的聊天都在这，直接点加，不用查 id）</h2>
+{% if recent %}
+<div class="row">
+  <input type="text" id="recentQ" placeholder="🔍 输入昵称/群名关键字过滤…" oninput="filterRecent(this.value)"
+         style="min-width:240px"><span class="muted" id="recentCount"></span>
+</div>
+<table id="recentT"><thead><tr><th style="width:26%">昵称/群名</th><th>微信id</th><th>类型</th><th>操作</th></tr></thead>
+<tbody id="recentB">
+{% for r in recent %}{% set _s = ((r.display or '') ~ ' ' ~ (r.id or '')) | lower %}
+<tr data-s="{{ _s }}"><td>{{ r.display or '(空昵称)' }}</td><td class="muted">{{ r.id }}</td>
+<td>{{ '群' if r.is_group else '私聊' }}</td><td>
+{% if r.id in cfg_ids %}<span class="muted">已配置</span>
+{% else %}<form method="post" action="/cfg/pick" style="margin:0">
+  <input type="hidden" name="id" value="{{ r.id }}">
+  <input type="hidden" name="display" value="{{ r.display or r.id }}">
+  <input type="hidden" name="kind" value="{{ 'group' if r.is_group else 'contact' }}">
+  <button>加为{{ '群' if r.is_group else '联系人' }}</button>
+</form>{% endif %}
+</td></tr>{% endfor %}
+</tbody></table>
+<p class="muted">列表来自微信"最近聊天"，没有的会话先在微信里点开一次就会出现在这里。API 形式：<code>/api/sessions?q=关键字</code></p>
+<script>
+function filterRecent(q){
+  q=(q||'').trim().toLowerCase();
+  var rows=document.getElementById('recentB').rows, n=0;
+  for(var i=0;i<rows.length;i++){
+    var hit=!q||rows[i].getAttribute('data-s').indexOf(q)>=0;
+    rows[i].style.display=hit?'':'none'; if(hit)n++;
+  }
+  document.getElementById('recentCount').textContent=n+' 个会话';
+}
+filterRecent('');
+</script>
+{% else %}<p class="muted">{{ '微信未连接，连上后这里会列出最近会话' if not driver_up else '最近会话为空：先在微信里点开几个聊天' }}</p>{% endif %}
+</div>
 
 <a name="contacts"></a><div class="card"><h2>私聊联系人（白名单：勾选"启用"的才会 AI 自动回复）</h2>
 {% for c in contacts %}
@@ -224,6 +294,26 @@ details summary{cursor:pointer;font-weight:bold;font-size:14px}
 </body></html>"""
 
 
+_recent_cache = {"ts": 0.0, "rows": []}
+
+
+def _recent_chats(bot):
+    """最近会话（带 30s 缓存——每次渲染都查一遍 80 个昵称太重）。"""
+    drv = getattr(bot, "driver", None)
+    lister = getattr(drv, "list_recent_chats", None)
+    if not (drv and callable(lister)):
+        return []
+    if time.time() - _recent_cache["ts"] < 30:
+        return _recent_cache["rows"]
+    try:
+        rows = list(lister(80))
+    except Exception as e:
+        log.warning("最近会话读取失败: %s", e)
+        return []
+    _recent_cache.update(ts=time.time(), rows=rows)
+    return rows
+
+
 def start_web(bot):
     app = Flask(__name__)
     app.debug = False
@@ -256,7 +346,19 @@ def start_web(bot):
         _hot_apply()
         _flash["msg"] = "已保存并生效"
 
-    def _render(form_error=""):
+    def _candidates(q):
+        """反查失败时的模糊候选（昵称/群名/ID 子串匹配，忽略空格大小写）。"""
+        drv = getattr(bot, "driver", None)
+        searcher = getattr(drv, "search_chats", None)
+        if not callable(searcher):
+            return []
+        try:
+            return list(searcher(q, 8))
+        except Exception as e:
+            log.warning("会话搜索失败: %s", e)
+            return []
+
+    def _render(form_error="", candidates=()):
         cfg = bot.cfg
         snap = cfg.snapshot()
         logs = bot.store.recent_logs(30)
@@ -264,6 +366,9 @@ def start_web(bot):
             l["t"] = time.strftime("%m-%d %H:%M:%S", time.localtime(l["ts"]))
             l["detail"] = html.escape(str(l["detail"]))[:120]
         driver = getattr(bot, "driver", None)
+        recent = _recent_chats(bot)
+        cfg_ids = ({(c or {}).get("id") for c in snap.get("contacts") or []}
+                   | {(g or {}).get("id") for g in snap.get("groups") or []})
         return render_template_string(
             _PAGE, nav=_NAV,
             self_name=(driver.self_name if driver else "未连接"),
@@ -271,6 +376,9 @@ def start_web(bot):
             paused=bot.state["paused"],
             error=getattr(bot, "startup_error", None),
             flash=_flash["msg"], form_error=form_error,
+            candidates=candidates or (),
+            setup_done=bool((snap.get("app") or {}).get("setup_done", True)),
+            recent=recent, cfg_ids=cfg_ids, driver_up=bool(driver),
             contacts=snap.get("contacts") or [], groups=snap.get("groups") or [],
             personas=snap.get("personas") or {}, persona_names=cfg.persona_names,
             llm=snap.get("llm") or {}, kb=snap.get("kb") or {}, reply=snap.get("reply") or {},
@@ -319,9 +427,13 @@ def start_web(bot):
                 return _render(form_error="联系人昵称不能为空")
             cid = (f.get("id") or "").strip()
             if not cid:
-                cid = bot.driver.resolve_id(display) if getattr(bot, "driver", None) else ""
+                drv = getattr(bot, "driver", None)
+                resolver = getattr(drv, "resolve_id", None)
+                cid = resolver(display) if callable(resolver) else ""
                 if not cid:
-                    return _render(form_error=f"反查不到 {display} 的微信号，请手填 id")
+                    return _render(
+                        form_error=f"反查不到 {display} 的微信号，看看下面候选或去『最近会话』点选",
+                        candidates=_candidates(display))
             if any(c.get("id") == cid for c in items):
                 return _render(form_error=f"{display}（{cid}）已在列表中")
             items.append({"id": cid, "display": display,
@@ -393,7 +505,8 @@ def start_web(bot):
             hit = driver.resolve_group_id(gname) if driver else None
             if not hit:
                 return _render(
-                    form_error=f"最近会话里找不到“{gname}”：请在微信里点开这个群聊一次，再回来添加")
+                    form_error=f"最近会话里找不到“{gname}”：请在微信里点开这个群聊一次，再回来添加",
+                    candidates=_candidates(gname))
             gid, matched = hit
             _flash["msg"] = f"已自动匹配群“{matched}”"
         data = {
@@ -419,6 +532,88 @@ def start_web(bot):
             groups[idx] = data
         _persist()
         return redirect("/")
+
+    @app.post("/cfg/pick")
+    def cfg_pick():
+        """最近会话选择器/候选按钮的一键添加（id 直接给全，无需反查）。"""
+        f = request.form
+        cid = (f.get("id") or "").strip()
+        display = (f.get("display") or "").strip()
+        if not cid or not display:
+            return _render(form_error="参数错误（缺 id 或昵称）")
+        kind = "group" if (f.get("kind") == "group" or cid.endswith("@chatroom")) else "contact"
+        if kind == "group":
+            items = bot.cfg.data.setdefault("groups", [])
+            if any(g.get("id") == cid for g in items):
+                _flash["msg"] = f"群 {display} 已经在列表里了"
+                return redirect("/")
+            items.append({"id": cid, "display": display, "enabled": True,
+                          "persona": "群管家-热心", "mine": False,
+                          "qa": {"enabled": True, "grounded_reply": True, "llm_fallback": False},
+                          "manage": {"welcome": True,
+                                     "welcome_text": "欢迎 {name} 入群！有问题可以直接 @我 提问～",
+                                     "forbidden_words": [],
+                                     "warn_persona": "群管家-热心", "warn_threshold": 2}})
+            _persist()
+            _flash["msg"] = f"已加群 {display}（启用中，答疑/欢迎默认开，可在上方调整）"
+        else:
+            items = bot.cfg.data.setdefault("contacts", [])
+            if any(c.get("id") == cid for c in items):
+                _flash["msg"] = f"{display} 已经在列表里了"
+                return redirect("/")
+            items.append({"id": cid, "display": display, "persona": "通用朋友", "enabled": True})
+            _persist()
+            _flash["msg"] = f"已加联系人 {display}（人设默认“通用朋友”，可在上方调整）"
+        return redirect("/")
+
+    @app.post("/setup/llm")
+    def setup_llm():
+        """首启向导：模型三件套（地址/Key/模型名）+ 可选知识库。"""
+        f = request.form
+        base = (f.get("base_url") or "").strip()
+        key = (f.get("api_key") or "").strip()
+        model = (f.get("model") or "").strip()
+        if base or key or model:
+            bad = [n for n, v in (("接口地址", base), ("API Key", key), ("模型名", model))
+                   if not v or "your-" in v.lower()]
+            if bad:
+                return _render(form_error="请填真实值再保存（还是占位符/空值）：" + "、".join(bad),
+                               candidates=())
+            llm = bot.cfg.data.setdefault("llm", {})
+            llm.update({"base_url": base, "api_key": key, "model": model})
+        kb_url = (f.get("kb_url") or "").strip()
+        kb_key = (f.get("kb_key") or "").strip()
+        if kb_url or kb_key:
+            kb = bot.cfg.data.setdefault("kb", {})
+            for k, v in (("url", kb_url), ("api_key", kb_key)):
+                if v and "your-" not in v.lower():
+                    kb[k] = v
+        _persist()
+        return redirect("/")
+
+    @app.post("/setup/done")
+    def setup_done():
+        bot.cfg.data.setdefault("app", {})["setup_done"] = True
+        _persist()
+        _flash["msg"] = ("向导完成！注意：当前是演示模式（只记日志不发送），"
+                         "确认无误后到『模型与节奏』取消勾选才真正回复")
+        return redirect("/")
+
+    @app.route("/api/sessions")
+    def api_sessions():
+        """JSON 形式的最近会话（?q= 走模糊搜索）。"""
+        drv = getattr(bot, "driver", None)
+        if not (drv and callable(getattr(drv, "list_recent_chats", None))):
+            return {"ok": False, "sessions": []}
+        q = (request.args.get("q") or "").strip()
+        try:
+            if q and callable(getattr(drv, "search_chats", None)):
+                rows = drv.search_chats(q, 20)
+            else:
+                rows = drv.list_recent_chats(60)
+        except Exception as e:
+            return {"ok": False, "sessions": [], "error": str(e)}
+        return {"ok": True, "sessions": rows}
 
     @app.post("/cfg/llm")
     def cfg_llm():

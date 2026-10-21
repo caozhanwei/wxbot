@@ -66,6 +66,26 @@ class WxDriver:
                 return u, n
         return None
 
+    def search_chats(self, q, limit=12):
+        """按昵称/群名/ID 模糊搜最近会话（忽略大小写与空格，子串匹配）。
+
+        供 Web 页"最近会话选择器"与"添加时给候选"使用；返回同 list_recent_chats。
+        """
+        key = re.sub(r"\s+", "", q or "").casefold()
+        if not key:
+            return []
+        hits = []
+        for s in self.db.get_sessions(limit=500):
+            u = s.get("username") or ""
+            if not u:
+                continue
+            disp = self.display_of(u) or ""
+            if key in re.sub(r"\s+", "", disp + " " + u).casefold():
+                hits.append({"id": u, "display": disp, "is_group": u.endswith("@chatroom")})
+                if len(hits) >= limit:
+                    break
+        return hits
+
     # ---------- 轮询 ----------
     def baseline(self, user_id, lookback=50):
         msgs = self.db.get_messages(user_id, limit=lookback)

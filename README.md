@@ -25,14 +25,18 @@ python -m pytest tests/ -q               # 46 个用例
 - **管理员命令**：私聊发 `#状态 #暂停 #恢复 #开 <名> #关 <名> #重载 #待审 #帮助`
 - **Web 状态页**（127.0.0.1:8778）：联系人/群开关、运行统计、日志、待沉淀问题、在线编辑配置（热重载；网页保存会丢注释，介意请直接编辑文件）
 - **配置热重载**：`bot_config.yaml` 改完即生效（LLM 模型/温度/超时、联系人、人设、群、违禁词阈值等）
+- **最近会话选择器**（v1.3.0）：Web 页"最近会话"卡片列出微信里点开过的聊天（支持关键字过滤），一键"加为联系人/加为群"，**无需知道任何 id**；手填昵称反查不到时自动给模糊候选；另有 `/api/sessions?q=关键字` JSON 接口
+- **首启向导**（v1.3.0）：新装机第一次打开 Web 页引导三步——确认微信已登录 → 填模型接口/Key → 从最近会话挑对象；模板默认 `dry_run: true`（演示模式，只记日志不发送），验证后再关
+- **多账号隔离**（v1.3.0）：登录后配置/数据库自动落到 `%APPDATA%\wxbot\<你的wxid>\`；换一个微信号登录自动切换（老账号数据原样保留，新账号从模板干净起步），给不同的人/号用互不串号
 
 ## 配置要点（bot_config.yaml）
 
 - `llm`：人设对话生成（provider/base_url/api_key/model/temperature/timeout 均可配）
 - `kb`：群答疑知识库（MCP 网关，需自行部署或填写可用网关；未配置时私聊功能不受影响）
-- `contacts`：`id`（微信号/wxid，不知道可只填 `display` 自动反查）+ `persona` + `enabled`
-- `groups`：`--list` 查 id 后填写；`qa.enabled` 答疑开关；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
-- `app.dry_run: true` 只记日志不发送
+- `contacts`：`id`（微信号/wxid，不知道可只填 `display` 自动反查；更推荐直接从 Web 页"最近会话"点选）+ `persona` + `enabled`
+- `groups`：`--list` 查 id 或 Web 页点选；`qa.enabled` 答疑开关；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
+- `app.dry_run: true` 只记日志不发送（**模板默认开**，新装机先在演示模式验证）
+- `app.self_wxid` / `app.setup_done`：程序自动维护（多账号隔离标识/向导完成标志），勿手改
 
 ## 安全与风控
 
@@ -53,12 +57,14 @@ python -m pytest tests/ -q               # 46 个用例
 
 ```
 run_bot.py        入口（--list/--check/--test-reply/运行）
-bot_config.yaml   全部配置（keys 勿外传；模板见 bot_config_template.yaml）
+bot_config.yaml   全部配置（keys 勿外传；分发模板见 bot_config_template.yaml——不含任何真实密钥）
 wxbot/            config(热重载) driver(replica封装) personas(人设引擎)
                   group_logic(纯逻辑) store(sqlite) bot(编排) webui(Flask状态页) mining(群历史挖掘)
-tests/            46 个用例
+                  paths(多账号隔离：%APPDATA%\wxbot\<wxid>\)
+tests/            pytest 用例（含 webui 配置页 / 多账号隔离）
 vendor/           wechatauto-replica 源码（editable 安装，勿随意升级）
-build/            MSI 打包（PyInstaller → gen_files.py → WiX）
+build/            MSI 打包（PyInstaller → gen_files.py → WiX）；redist/ 内置 VC++ MFC 运行库 DLL，
+                  随包装进 _internal，用户机器免装 VC 运行库
 ```
 
 ## 构建 MSI（Windows）

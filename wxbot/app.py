@@ -49,9 +49,18 @@ class BotShell:
 
     def _run(self):
         from .bot import Bot
+        from .driver import WxDriver
         try:
+            drv = WxDriver()
+            # 多账号隔离：按登录 wxid 切换/迁移配置与数据库到账号子目录
+            new_path = paths.maybe_switch_account(self.cfg_path, drv.self_id)
+            if new_path != self.cfg_path:
+                self.cfg_path = new_path
+                self.cfg = BotConfig(new_path)
+                self.store = Store(paths.resolve(self.cfg.db_file))
+                log.info("已切换到账号配置: %s", new_path)
             bot = Bot(cfg_path=self.cfg_path, with_web=False,
-                      cfg=self.cfg, state=self.state)
+                      cfg=self.cfg, state=self.state, driver=drv)
         except Exception as e:
             log.error("Bot 启动失败: %s", e)
             self.startup_error = f"{type(e).__name__}: {e}"
