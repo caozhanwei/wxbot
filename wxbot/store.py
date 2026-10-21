@@ -93,11 +93,11 @@ class Store:
                 "INSERT INTO mined(ts,grp,question,answer) VALUES(?,?,?,?)",
                 [(time.time(), grp, str(q)[:200], str(a)[:400]) for q, a in pairs])
 
-    def mined_pairs(self, grp=None, limit=50):
+    def mined_pairs(self, grp=None, limit=50, offset=0):
         q = ("SELECT * FROM mined" + (" WHERE grp=?" if grp else "")
-             + " ORDER BY id DESC LIMIT ?")
+             + " ORDER BY id DESC LIMIT ? OFFSET ?")
         with self._conn() as c:
-            rows = c.execute(q, ((grp,) if grp else ()) + (limit,)).fetchall()
+            rows = c.execute(q, ((grp,) if grp else ()) + (limit, offset)).fetchall()
             return [dict(r) for r in rows]
 
     def mined_count(self, grp=None):
@@ -144,14 +144,19 @@ class Store:
                 "VALUES(?,?,?,?,?) ON CONFLICT(grp,wxid) DO UPDATE SET "
                 "nickname=excluded.nickname, profile=excluded.profile, "
                 "updated=excluded.updated",
-                (grp, wxid, nickname, str(profile)[:400], time.time()))
+                (grp, wxid, nickname, str(profile)[:2000], time.time()))
 
-    def profiles(self, grp=None, limit=200):
+    def profiles(self, grp=None, limit=200, offset=0):
         q = ("SELECT * FROM member_profiles" + (" WHERE grp=?" if grp else "")
-             + " ORDER BY updated DESC LIMIT ?")
+             + " ORDER BY updated DESC LIMIT ? OFFSET ?")
         with self._conn() as c:
-            rows = c.execute(q, ((grp,) if grp else ()) + (limit,)).fetchall()
+            rows = c.execute(q, ((grp,) if grp else ()) + (limit, offset)).fetchall()
             return [dict(r) for r in rows]
+
+    def profiles_count(self, grp=None):
+        q = "SELECT COUNT(*) n FROM member_profiles" + (" WHERE grp=?" if grp else "")
+        with self._conn() as c:
+            return c.execute(q, ((grp,) if grp else ())).fetchone()["n"]
 
     # ---------- 查询 ----------
     def recent_logs(self, limit=50):

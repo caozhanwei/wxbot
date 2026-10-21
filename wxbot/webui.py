@@ -12,6 +12,8 @@ from . import mining, profiles as profiles_mod
 
 log = logging.getLogger("wxbot.web")
 
+_PAGE_SIZE = 20   # 画像/问答库浏览页大小
+
 _NAV = [("状态", "#top"), ("最近会话", "#recent"), ("联系人", "#contacts"),
         ("人设", "#personas"), ("群", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
         ("日志", "#logs"), ("待沉淀", "#pending"), ("挖掘", "#mine"),
@@ -287,11 +289,21 @@ filterRecent('');
   <button>导出全部为 Markdown</button>
   <span class="muted">导出文件交给知识库管理员导入即可入库</span>
 </form>
+<div class="row">
+  <span class="muted">按群：</span>
+  {% for l in m_group_links %}<a href="{{ l.href }}" class="{{ 'on' if l.active }}" style="margin-right:10px;font-size:13px">{{ l.name }}</a>{% endfor %}
+</div>
 <table><tr><th>群</th><th>问题</th><th>回答</th></tr>
-{% for r in mined %}<tr><td>{{ r.grp }}</td><td>{{ r.question }}</td><td>{{ r.answer }}</td></tr>
+{% for r in mined %}<tr><td>{{ r.grp_name or r.grp }}</td><td>{{ r.question }}</td><td>{{ r.answer }}</td></tr>
 {% endfor %}
 {% if not mined %}<tr><td colspan="3" class="muted">还没有挖掘记录</td></tr>{% endif %}
-</table></div>
+</table>
+<div class="row">
+  {% if m_prev %}<a href="{{ m_prev }}">← 上一页</a>{% endif %}
+  <span class="muted">第 {{ m_page_no }} / {{ m_pages_n }} 页（共 {{ m_total }} 条）</span>
+  {% if m_next %}<a href="{{ m_next }}">下一页 →</a>{% endif %}
+</div>
+</div>
 
 <a name="profiles"></a><div class="card"><h2>群友画像（群×成员 维度，答疑后自动更新，回答时注入帮助理解提问）</h2>
 {% if profile_status.running %}<p><b>正在刷新 {{ profile_status.group }}：{{ profile_status.done }}/{{ profile_status.total }} 个成员…（页面每 5 秒自动刷新）</b></p>
@@ -304,12 +316,22 @@ filterRecent('');
   <span class="muted">取群最近消息里最活跃的成员重建画像（每人至少间隔 1 小时才会真正重算）</span>
 </form>
 {% endfor %}
+<div class="row">
+  <span class="muted">按群：</span>
+  {% for l in p_group_links %}<a href="{{ l.href }}" class="{{ 'on' if l.active }}" style="margin-right:10px;font-size:13px">{{ l.name }}</a>{% endfor %}
+</div>
 <table><tr><th>群</th><th>昵称</th><th>画像</th><th>更新时间</th></tr>
 {% for p in member_profiles %}<tr><td>{{ p.grp_name }}</td><td>{{ p.nickname }}</td>
 <td>{{ p.profile }}</td><td class="muted">{{ p.updated_t }}</td></tr>
 {% endfor %}
 {% if not member_profiles %}<tr><td colspan="4" class="muted">还没有画像：群答疑后自动生成，或点上面"刷新该群画像"</td></tr>{% endif %}
-</table></div>
+</table>
+<div class="row">
+  {% if p_prev %}<a href="{{ p_prev }}">← 上一页</a>{% endif %}
+  <span class="muted">第 {{ p_page_no }} / {{ p_pages_n }} 页（共 {{ p_total }} 条）</span>
+  {% if p_next %}<a href="{{ p_next }}">下一页 →</a>{% endif %}
+</div>
+</div>
 
 <a name="yaml"></a><div class="card"><details><summary>高级：YAML 源码（给 AI / 调试用，网页保存会丢注释）</summary>
 <form method="post" action="/config">
@@ -384,7 +406,7 @@ def start_web(bot):
             log.warning("会话搜索失败: %s", e)
             return []
 
-    def _render(form_error="", candidates=()):
+    def _render(form_error="", candidates=(), p_grp="", p_page=1, m_grp="", m_page=1):
         cfg = bot.cfg
         snap = cfg.snapshot()
         logs = bot.store.recent_logs(30)
@@ -397,15 +419,49 @@ def start_web(bot):
                    | {(g or {}).get("id") for g in snap.get("groups") or []})
         grp_names = {g.get("id"): (g.get("display") or g.get("id") or "")
                      for g in snap.get("groups") or []}
-        profs = []
+
+        def _int(v, default=1):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        def _paged(total, page):
+            pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+            return min(max(1, page), pages), pages
+
+        def _href(**over):
+            q = {"p_grp": p_grp, "p_page": p_page, "m_grp": m_grp, "m_page": m_page}
+            q.update(over)
+            return "/?" + "&".join(f"{k}={v}" for k, v in q.items() if v not in ("", 1))
+
+        def _group_links(cur, which):
+            links = [{"name": "全部", "active": not cur,
+                      "href": _href(**{which + "_grp": "", which + "_page": 1})}]
+            for g in snap.get("groups") or []:
+                gid = g.get("id") or ""
+                if gid:
+                    links.append({"name": g.get("display") or gid, "active": gid == cur,
+                                  "href": _href(**{which + "_grp": gid, which + "_page": 1})})
+            return links
+
+        p_grp, m_grp = str(p_grp or ""), str(m_grp or "")
+        p_page, p_pages = _paged(bot.store.profiles_count(p_grp or None), _int(p_page))
+        m_page, m_pages = _paged(bot.store.mined_count(m_grp or None), _int(m_page))
         try:
-            profs = bot.store.profiles(limit=60)
+            profs = bot.store.profiles(p_grp or None, limit=_PAGE_SIZE,
+                                       offset=(p_page - 1) * _PAGE_SIZE)
         except Exception as e:
             log.warning("画像读取失败: %s", e)
+            profs = []
         for p in profs:
             p["grp_name"] = grp_names.get(p.get("grp")) or p.get("grp") or ""
             p["updated_t"] = time.strftime("%m-%d %H:%M",
                                            time.localtime(p.get("updated") or 0))
+        mined = bot.store.mined_pairs(m_grp or None, limit=_PAGE_SIZE,
+                                      offset=(m_page - 1) * _PAGE_SIZE)
+        for r in mined:
+            r["grp_name"] = grp_names.get(r.get("grp")) or r.get("grp") or ""
         return render_template_string(
             _PAGE, nav=_NAV,
             self_name=(driver.self_name if driver else "未连接"),
@@ -425,15 +481,25 @@ def start_web(bot):
             warns=" / ".join(f'{w["chat"]}·{w["member"]}×{w["n"]}'
                              for w in bot.store.warn_counts()[:8]) or "无",
             logs=logs, pending=bot.store.qa_pending(20),
-            mine_status=mining.status(), mined=bot.store.mined_pairs(limit=15),
-            mined_count=bot.store.mined_count(),
+            mine_status=mining.status(), mined=mined, mined_count=bot.store.mined_count(),
+            m_group_links=_group_links(m_grp, "m"), m_page_no=m_page, m_pages_n=m_pages,
+            m_total=bot.store.mined_count(m_grp or None),
+            m_prev=(_href(m_page=m_page - 1) if m_page > 1 else ""),
+            m_next=(_href(m_page=m_page + 1) if m_page < m_pages else ""),
             member_profiles=profs, profile_status=profiles_mod.status(),
+            p_group_links=_group_links(p_grp, "p"), p_page_no=p_page, p_pages_n=p_pages,
+            p_total=bot.store.profiles_count(p_grp or None),
+            p_prev=(_href(p_page=p_page - 1) if p_page > 1 else ""),
+            p_next=(_href(p_page=p_page + 1) if p_page < p_pages else ""),
             cfg_text=yaml.safe_dump(snap, allow_unicode=True, sort_keys=False))
 
     @app.route("/")
     def index():
         _flash["msg"] = ""
-        return _render()
+        return _render(p_grp=request.args.get("p_grp", ""),
+                       p_page=request.args.get("p_page", 1),
+                       m_grp=request.args.get("m_grp", ""),
+                       m_page=request.args.get("m_page", 1))
 
     @app.post("/pause")
     def pause():
