@@ -67,7 +67,7 @@ build/            MSI 打包（PyInstaller → gen_files.py → WiX）
 pip install pyinstaller && pip install -e vendor/wechatauto-replica
 pyinstaller wxbot.spec --noconfirm
 cd build && python gen_files.py ..\dist\wxbot
-wix build -arch x64 "-define SourceDir=%CD%\..\dist\wxbot" product.wxs files.wxs -o wxbot.msi
+wix build -arch x64 product.wxs files.wxs -o wxbot.msi
 ```
 
 需要 [WiX v6](https://wixtoolset.org/)（`dotnet tool install --global wix`）与 .NET 8 SDK。

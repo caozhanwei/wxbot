@@ -31,7 +31,7 @@ def walk(rel, parent_id):
             walk(relpath, did)
         else:
             cid = fid(relpath, "c")
-            src = "$(var.SourceDir)" + relpath.replace("\\", "/")
+            src = os.path.abspath(os.path.join(ROOT, rel)).replace("\\", "/")
             comp_defs.append((here, cid,
                               f'<Component Id="{cid}">'
                               f'<File Id="{fid(relpath, "f")}" Source="{src}" KeyPath="yes"/>'

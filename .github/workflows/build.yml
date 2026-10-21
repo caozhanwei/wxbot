@@ -39,14 +39,14 @@ jobs:
           Select-String -Path build/product.wxs -Pattern 'Version='
 
       - name: Install WiX
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 6.0.2
 
       - name: Build MSI
         working-directory: build
         shell: pwsh
         run: |
           python gen_files.py ../dist/wxbot
-          wix build -arch x64 '-define SourceDir=../dist/wxbot' product.wxs files.wxs -o wxbot.msi
+          wix build -arch x64 product.wxs files.wxs -o wxbot.msi
           Get-Item wxbot.msi | Select-Object Name, Length
 
       - name: Upload MSI artifact
