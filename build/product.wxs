@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="微信智能助手" Codepage="936" Language="2052" Version="1.2.2"
+           Manufacturer="wxbot" Scope="perUser"
+           UpgradeCode="211cd010-c416-4fd9-a6b6-fa35caf03570">
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本，请先卸载后再安装此版本！" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 按用户安装到 %LocalAppData%\Programs\Wxbot，无需管理员 -->
+    <StandardDirectory Id="PerUserProgramFilesFolder">
+      <Directory Id="INSTALLDIR" Name="Wxbot" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="Shortcuts">
+      <Component Directory="INSTALLDIR" Guid="85cd9b6e-dc0a-41a3-bcf4-7745198e50cd">
+        <Shortcut Id="StartMenuShortcut" Name="微信智能助手" Description="微信智能助手"
+                  Target="[INSTALLDIR]wxbot.exe" WorkingDirectory="INSTALLDIR"
+                  Directory="ProgramMenuFolder" Icon="AppIcon.exe" />
+        <Shortcut Id="DesktopShortcut" Name="微信智能助手" Description="微信智能助手"
+                  Target="[INSTALLDIR]wxbot.exe" WorkingDirectory="INSTALLDIR"
+                  Directory="DesktopFolder" Icon="AppIcon.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Wxbot" Name="installed"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Icon Id="AppIcon.exe" SourceFile="app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.exe" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <Feature Id="Main" Title="微信智能助手" Level="1">
+      <ComponentGroupRef Id="WxbotFiles" />
+      <ComponentGroupRef Id="Shortcuts" />
+    </Feature>
+  </Package>
+</Wix>

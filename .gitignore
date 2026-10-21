@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# 运行时数据（含聊天记录/挖掘产物，勿入库）
+*.db
+*.log
+wechatauto_logs/
+exports/
+
+# 真实配置（模板 bot_config_template.yaml 入库，其余本地）
+bot_config.yaml
+bot_config_test.yaml
+config.yaml
+
+# 废弃原型/诊断脚本（含真实人名与私人对话细节）
+autoreply.py
+m0_*.py
+
+# 截图可能含聊天内容
+*.png
+
+# 构建产物与工具链（build/ 只留 3 个源文件）
+dist/
+WeChatSetup*.exe
+build/*
+!build/gen_files.py
+!build/product.wxs
+!build/app.ico
+.git_disabled/

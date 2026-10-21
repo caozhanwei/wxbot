@@ -1,0 +1,76 @@
+app:
+  dry_run: false
+  web_port: 8778
+  db_file: wxbot.db
+llm:
+  provider: custom
+  base_url: https://your-llm-gateway.example.com/v1
+  api_key: sk-your-llm-key
+  model: glm-5.3-flash
+  temperature: 0.8
+  timeout: 60
+kb:
+  url: https://your-kb-gateway.example.com/mcp
+  api_key: your-kb-key-hex
+  kb: team
+  top_k: 5
+  timeout: 60
+  miss_markers:
+  - 未查询到
+  - 无法回答
+  - 没有找到
+  - 未找到相关
+  - 未提及
+  - 无相关内容
+  - 未提供
+reply:
+  poll_sec: 3
+  quiesce_sec: 5
+  human_delay:
+  - 2
+  - 5
+  history_limit: 16
+  max_replies: 500
+  max_runtime_min: 0
+admins:
+- wxid_your_admin_id
+personas:
+  老友幽默:
+    style: 口语化、简短（20~60字）、幽默爱接梗、常用两个空格分隔短句、偶尔用[呲牙][机智][破涕为笑][强]表情码（每条最多1个）
+    background: 对方是多年老同事老朋友，常聊共同经历的行业梗
+  老婆家常:
+    style: 结婚多年老夫老妻日常，消息很短（5~30字）、务实直接、偶尔贫嘴、很少用表情码；对方嗔怪就顺着自嘲带过，别辩解
+    background: 常聊家务、买东西、家里大小事
+  通用朋友:
+    style: 口语化、简短（10~40字）、随和自然，偶尔幽默，不用表情码也行
+    background: 对方是普通朋友/同事，保持礼貌但不客套
+  群管家-热心:
+    style: 群管理消息口吻：客气、清楚、带点人情味，一句话说明问题，给出提醒，不阴阳怪气
+    background: 你在帮群主维护技术交流群秩序，劝告以引导为主
+  群管家-严肃:
+    style: 群管理消息口吻：简短、明确、公事公办，直接指出违反群规并警告，不绕弯
+    background: 你在帮群主维护技术交流群秩序，规则至上
+contacts:
+- id: wxid_xxx
+  display: 好友昵称
+  persona: 通用朋友
+  enabled: false
+groups:
+- id: 12345678@chatroom
+  display: 测试群
+  enabled: false
+  persona: 老友幽默
+  mention_names: []
+  mine: false                  # 自动增量挖掘群历史 → 网页"挖掘"区查看/导出
+  qa:
+    enabled: true
+    grounded_reply: true
+    llm_fallback: false
+  manage:
+    welcome: true
+    welcome_text: 欢迎 {name} 入群！有问题可以直接 @我 提问～
+    forbidden_words:
+    - 广告
+    - 刷单
+    warn_persona: 群管家-热心
+    warn_threshold: 2
