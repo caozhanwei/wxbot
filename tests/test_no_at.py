@@ -219,7 +219,7 @@ def test_at_bot_still_goes_qa(bot):
     bot.personas._llm = llm
     bot.state["no_at_last"][GROUP] = time.time() + 999   # 免@已在冷却中
     bot._on_group_msgs(_w(bot), [_msg("@群助手 NETLIST_FILE 怎么配")])
-    assert llm.judged == 0 and llm.chatted == 0          # 没走免@链路
+    assert llm.judged == 1 and llm.chatted == 0          # @路径只走"提问理解"，不触发免@判定/人设
     assert bot._kb.asked == ["NETLIST_FILE 怎么配"]       # 走了 KB 答疑
     recs = _logs(bot, "qa")
     assert recs and "NETLIST_FILE 用于指定输出网表路径" in recs[0]["detail"]

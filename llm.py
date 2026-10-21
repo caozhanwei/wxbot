@@ -34,31 +34,36 @@ class LLM:
     def ready(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, system: str, user: str, temperature: float = 0.1) -> str:
+    def chat(self, system: str, user: str, temperature: float = 0.1,
+             max_tokens: int = 2000) -> str:
         if not self.ready:
             raise LLMError("LLM api_key 未配置（config.yaml llm 段）")
-        resp = requests.post(
-            f"{self.base}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": self.model,
-                "temperature": temperature,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            }, timeout=self.timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise LLMError(f"LLM 响应格式异常: {e}: {json.dumps(data, ensure_ascii=False)[:300]}")
-        # 推理型模型（reasoning_content）在 max_tokens 太小时 content 可能为空
-        if not (content or "").strip():
-            raise LLMError("LLM content 为空（可能被 reasoning 占满）")
-        return content.strip()
+        # 推理型模型（reasoning_content）会先消耗预算，max_tokens 太小 content 会被吃空
+        content = ""
+        for attempt in range(2):
+            resp = requests.post(
+                f"{self.base}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model": self.model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                }, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError) as e:
+                raise LLMError(f"LLM 响应格式异常: {e}: {json.dumps(data, ensure_ascii=False)[:300]}")
+            if (content or "").strip():
+                return content.strip()
+            log.warning("LLM content 为空（可能被 reasoning 占满），重试 %d/1", attempt + 1)
+        raise LLMError("LLM content 为空（重试后仍为空）")
 
     def chat_json(self, system: str, user: str, temperature: float = 0.1):
         """要求模型输出 JSON 并解析。"""

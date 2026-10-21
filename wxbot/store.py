@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS mined_seq(
     chat TEXT PRIMARY KEY, seq INTEGER, ts REAL);
 CREATE TABLE IF NOT EXISTS kb_sink(
     chat TEXT PRIMARY KEY, seq INTEGER, ts REAL);
+CREATE TABLE IF NOT EXISTS member_profiles(
+    grp TEXT, wxid TEXT, nickname TEXT, profile TEXT,
+    updated REAL, PRIMARY KEY(grp, wxid));
 """
 
 
@@ -126,6 +129,29 @@ class Store:
             c.execute("INSERT INTO kb_sink(chat,seq,ts) VALUES(?,?,?) "
                       "ON CONFLICT(chat) DO UPDATE SET seq=excluded.seq, ts=excluded.ts",
                       (chat, seq, time.time()))
+
+    # ---------- 成员画像 ----------
+    def get_profile(self, grp, wxid):
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM member_profiles WHERE grp=? AND wxid=?",
+                            (grp, wxid)).fetchone()
+            return dict(row) if row else None
+
+    def upsert_profile(self, grp, wxid, nickname, profile):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO member_profiles(grp,wxid,nickname,profile,updated) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(grp,wxid) DO UPDATE SET "
+                "nickname=excluded.nickname, profile=excluded.profile, "
+                "updated=excluded.updated",
+                (grp, wxid, nickname, str(profile)[:400], time.time()))
+
+    def profiles(self, grp=None, limit=200):
+        q = ("SELECT * FROM member_profiles" + (" WHERE grp=?" if grp else "")
+             + " ORDER BY updated DESC LIMIT ?")
+        with self._conn() as c:
+            rows = c.execute(q, ((grp,) if grp else ()) + (limit,)).fetchall()
+            return [dict(r) for r in rows]
 
     # ---------- 查询 ----------
     def recent_logs(self, limit=50):

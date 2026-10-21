@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """驱动层：封装 wechatauto-replica（DB 读 + UIA 写）。"""
 import logging
+import os
 import re
+import tempfile
 import time
 
 from wechatauto.db import WeChatDB
+from wechatauto.media import MediaDownloader
 from wechatauto.uia_driver import WeChatUIA
 
 from . import group_logic
+from .ocr import OcrClient
 
 log = logging.getLogger("wxbot.driver")
 
@@ -24,7 +28,20 @@ class WxDriver:
         info = self.db.get_self_info() or {}
         self.self_id = info.get("username") or info.get("wxid") or ""
         self.self_name = info.get("nick_name") or info.get("nickname") or self.self_id
-        log.info("驱动就绪 self=%s(%s)", self.self_id, self.self_name)
+        self.ocr = OcrClient(None)   # 未配置；Bot 启动时 setup_ocr() 注入
+        self._media = None
+        self._ocr_cache = {}         # (user, local_id) -> 识别文字（''=已试过没有/失败）
+        log.info("驱动就绪 self=%s(%s) ocr=%s", self.self_id, self.self_name,
+                 "on" if self.ocr.ready else "off")
+
+    def setup_ocr(self, ocr_cfg):
+        """按配置启用/重建 OCR 客户端（热重载后可再调）；清空识别缓存。"""
+        client = OcrClient(ocr_cfg)
+        if client.ready != self.ocr.ready or getattr(client, "url", "") != self.ocr.url:
+            self._ocr_cache.clear()
+        self.ocr = client
+        log.info("OCR %s（url=%s）", "已启用" if client.ready else "未配置，图片降级为占位",
+                 client.url or "-")
 
     # ---------- 联系人解析 ----------
     def resolve_id(self, display):
@@ -106,6 +123,7 @@ class WxDriver:
                 "content": (m.get("content") or "").strip(),
                 "ts": m.get("create_time"),
                 "seq": m["sort_seq"],
+                "local_id": m.get("local_id"),
                 "is_self": (m.get("sender_username") == self.self_id),
                 "is_group": is_group,
             }
@@ -129,11 +147,11 @@ class WxDriver:
 
     # ---------- 上下文 ----------
     def build_context(self, user_id, limit=16, speaker_map=None):
-        """最近对话行（"我: x" / "昵称: x"），过滤隐私与超长。"""
+        """最近对话行（"我: x" / "昵称: x"），过滤隐私与超长；图片尽量 OCR 出文字。"""
         msgs = self.db.get_messages(user_id, limit=limit * 2)
         lines = []
         for m in reversed(msgs):
-            c = self._friendly(m)
+            c = self._friendly(m, user_id)
             if not c:
                 continue
             if user_id.endswith("@chatroom"):
@@ -147,7 +165,55 @@ class WxDriver:
                 break
         return lines
 
-    def _friendly(self, m):
+    def image_text(self, user_id, local_id):
+        """解密群图片并 OCR；结果缓存（含失败），失败返回空串。"""
+        if not local_id:
+            return ""
+        key = (user_id, local_id)
+        if key in self._ocr_cache:
+            return self._ocr_cache[key]
+        text = ""
+        try:
+            save_dir = os.path.join(tempfile.gettempdir(), "wxbot_ocr")
+            if not self._media:
+                self._media = MediaDownloader(self.db, save_dir=save_dir)
+            path = self._media.download_media(user_id, local_id, save_dir)
+            if path and os.path.isfile(path):
+                with open(path, "rb") as f:
+                    text = self.ocr.ocr(f.read())[:120]
+        except Exception as e:
+            log.info("图片OCR失败 %s#%s: %s", user_id, local_id, e)
+        if text:
+            log.info("图片OCR %s#%s: %s", user_id, local_id, text[:60])
+        self._ocr_cache[key] = text
+        return text
+
+    def member_lines(self, user_id, wxid, limit=20):
+        """某成员在会话里的最近发言（_friendly 规整、脱敏、图片 OCR）。"""
+        msgs = self.db.get_messages(user_id, limit=200)
+        lines = []
+        for m in reversed(msgs):
+            who = m.get("sender_username") or ""
+            body = str(m.get("content") or "")
+            if user_id.endswith("@chatroom"):
+                sender, parsed = group_logic.parse_group_content(body)
+                who = who or sender
+                body = parsed
+            if who != wxid:
+                continue
+            f = self._friendly(dict(m, content=body), user_id)
+            if f and not f.startswith("[略"):
+                lines.append(f)
+            if len(lines) >= limit:
+                break
+        return lines
+
+    def _friendly(self, m, user_id=None):
+        c = (m.get("content") or "").strip()
+        if c.startswith("<?xml"):
+            if "<img" in c:
+                text = self.image_text(user_id, m.get("local_id")) if user_id else ""
+                return f"[图片:{text[:60]}]" if text else "[图片]"
         c = (m.get("content") or "").strip()
         if c.startswith("<?xml"):
             if "<img" in c:

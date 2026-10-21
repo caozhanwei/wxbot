@@ -65,6 +65,10 @@ class BotConfig:
         return self.data.get("kb") or {}
 
     @property
+    def ocr_cfg(self):
+        return self.data.get("ocr") or {}
+
+    @property
     def reply_cfg(self):
         return self.data.get("reply") or {}
 

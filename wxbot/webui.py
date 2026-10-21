@@ -8,16 +8,17 @@ import time
 import yaml
 from flask import Flask, request, redirect, render_template_string
 
-from . import mining
+from . import mining, profiles as profiles_mod
 
 log = logging.getLogger("wxbot.web")
 
 _NAV = [("状态", "#top"), ("最近会话", "#recent"), ("联系人", "#contacts"),
         ("人设", "#personas"), ("群", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
-        ("日志", "#logs"), ("待沉淀", "#pending"), ("挖掘", "#mine"), ("YAML", "#yaml")]
+        ("日志", "#logs"), ("待沉淀", "#pending"), ("挖掘", "#mine"),
+        ("群友画像", "#profiles"), ("YAML", "#yaml")]
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
-{% if mine_status.running %}<meta http-equiv="refresh" content="5">{% endif %}
+{% if mine_status.running or profile_status.running %}<meta http-equiv="refresh" content="5">{% endif %}
 <title>微信智能助手</title><style>
 body{font-family:"Microsoft YaHei",sans-serif;margin:20px 28px;background:#f5f6f8;color:#222}
 h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:14px 0 8px}
@@ -292,6 +293,24 @@ filterRecent('');
 {% if not mined %}<tr><td colspan="3" class="muted">还没有挖掘记录</td></tr>{% endif %}
 </table></div>
 
+<a name="profiles"></a><div class="card"><h2>群友画像（群×成员 维度，答疑后自动更新，回答时注入帮助理解提问）</h2>
+{% if profile_status.running %}<p><b>正在刷新 {{ profile_status.group }}：{{ profile_status.done }}/{{ profile_status.total }} 个成员…（页面每 5 秒自动刷新）</b></p>
+{% elif profile_status.error %}<p class="err">上次刷新失败：{{ profile_status.error }}</p>{% endif %}
+{% for g in groups %}
+<form method="post" action="/profiles/refresh" class="row">
+  <input type="hidden" name="idx" value="{{ loop.index0 }}">
+  <b style="min-width:140px">{{ g.display or g.id }}</b>
+  <button>刷新该群画像</button>
+  <span class="muted">取群最近消息里最活跃的成员重建画像（每人至少间隔 1 小时才会真正重算）</span>
+</form>
+{% endfor %}
+<table><tr><th>群</th><th>昵称</th><th>画像</th><th>更新时间</th></tr>
+{% for p in member_profiles %}<tr><td>{{ p.grp_name }}</td><td>{{ p.nickname }}</td>
+<td>{{ p.profile }}</td><td class="muted">{{ p.updated_t }}</td></tr>
+{% endfor %}
+{% if not member_profiles %}<tr><td colspan="4" class="muted">还没有画像：群答疑后自动生成，或点上面"刷新该群画像"</td></tr>{% endif %}
+</table></div>
+
 <a name="yaml"></a><div class="card"><details><summary>高级：YAML 源码（给 AI / 调试用，网页保存会丢注释）</summary>
 <form method="post" action="/config">
 <textarea name="cfg">{{ cfg_text }}</textarea><br>
@@ -376,6 +395,17 @@ def start_web(bot):
         recent = _recent_chats(bot)
         cfg_ids = ({(c or {}).get("id") for c in snap.get("contacts") or []}
                    | {(g or {}).get("id") for g in snap.get("groups") or []})
+        grp_names = {g.get("id"): (g.get("display") or g.get("id") or "")
+                     for g in snap.get("groups") or []}
+        profs = []
+        try:
+            profs = bot.store.profiles(limit=60)
+        except Exception as e:
+            log.warning("画像读取失败: %s", e)
+        for p in profs:
+            p["grp_name"] = grp_names.get(p.get("grp")) or p.get("grp") or ""
+            p["updated_t"] = time.strftime("%m-%d %H:%M",
+                                           time.localtime(p.get("updated") or 0))
         return render_template_string(
             _PAGE, nav=_NAV,
             self_name=(driver.self_name if driver else "未连接"),
@@ -397,6 +427,7 @@ def start_web(bot):
             logs=logs, pending=bot.store.qa_pending(20),
             mine_status=mining.status(), mined=bot.store.mined_pairs(limit=15),
             mined_count=bot.store.mined_count(),
+            member_profiles=profs, profile_status=profiles_mod.status(),
             cfg_text=yaml.safe_dump(snap, allow_unicode=True, sort_keys=False))
 
     @app.route("/")
@@ -717,6 +748,21 @@ def start_web(bot):
     def mine_export():
         path = mining.export_markdown(bot.store)
         _flash["msg"] = f"已导出：{path}" if path else "还没有可导出的问答"
+        return redirect("/")
+
+    @app.post("/profiles/refresh")
+    def profiles_refresh():
+        if not getattr(bot, "driver", None):
+            return _render(form_error="微信未连接，无法刷新画像")
+        try:
+            g = (bot.cfg.data.get("groups") or [])[int(request.form.get("idx"))]
+        except (TypeError, ValueError, IndexError):
+            return _render(form_error="参数错误")
+        inner = getattr(bot, "_bot", None) or bot
+        ok = profiles_mod.start_refresh(inner, g.get("id") or "",
+                                        g.get("display") or g.get("id") or "")
+        _flash["msg"] = (f"已开始刷新 {g.get('display')} 的群友画像" if ok
+                         else "已有画像任务在跑或微信/模型未就绪，稍后再试")
         return redirect("/")
 
     @app.post("/config")

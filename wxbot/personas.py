@@ -71,6 +71,51 @@ class PersonaEngine:
         raw = self.llm.chat(system, user, temperature=temp)
         return _sanitize(raw)
 
+    def understand_question(self, group, context_lines, question, asker, profile=""):
+        """结合群聊上下文理解@提问：补全指代成独立问题 + 判断是否真在求答。
+
+        返回 {"standalone": str, "should_answer": bool}；失败抛异常由调用方降级。
+        """
+        system = (
+            "你是微信群助手的提问理解器。结合群里最近的对话，把提问者的问题改写成一个"
+            "不依赖上下文也能看懂的独立问题（补全指代，如\"它多少钱\"要落到具体在问什么），"
+            "并判断他是否真的在求助/求答案。"
+            '只输出 JSON：{"standalone": "改写后的独立问题", "should_answer": true或false}。'
+            "should_answer=false：闲聊寒暄、反问、自问自答、开玩笑、纯@着玩；"
+            "true：明确提出问题、求助、求资源/文档。改写保持原意，别添造信息。"
+        )
+        user = f"群：{group}\n提问者：{asker}"
+        if profile:
+            user += f"（画像：{profile}）"
+        user += ("\n最近对话：\n" + "\n".join(context_lines[-12:])
+                 + f"\n\n提问：{question}\n分析：")
+        d = self.llm.chat_json(system, user, temperature=0.0)
+        standalone = str(d.get("standalone") or "").strip() or question
+        return {"standalone": standalone, "should_answer": bool(d.get("should_answer", True))}
+
+    def group_answer(self, persona_name, group, context_lines, question,
+                     asker, profile="", kb_ref=""):
+        """@提问的群内回答：结合上下文与提问者画像，像真人接话一样答，可引用群友观点。"""
+        p = self.cfg.persona(persona_name)
+        system = (f'你是微信群"{group}"里的助手（有人@你提问）。'
+                  f"回答风格：{p.get('style')}。背景：{p.get('background') or '帮群友答疑'}。"
+                  "结合群里最近的讨论来回答：像顺着大家话头接话，不重复别人已说透的点，"
+                  "可以自然引用群友昵称提到的观点（如\"刚才xx说的对\"）；"
+                  "答案不确定就直说，别编造。"
+                  "只输出一条可直接发送的微信群文本：不要@提问者以外的其他人、"
+                  "不要解释、不要引号、不要markdown，不超过 200 字。")
+        user = "群里最近的对话：\n" + "\n".join(context_lines)
+        if profile:
+            user += f"\n\n提问者画像：{profile}"
+        user += f"\n\n{asker} 的问题：{question}"
+        if kb_ref:
+            user += ("\n\n知识库检索到的参考资料（可信时优先依据，与问题无关就忽略）：\n"
+                     + kb_ref[:1200])
+        user += "\n\n请生成你的回答："
+        temp = float(self.cfg.llm_cfg.get("temperature", 0.8))
+        raw = self.llm.chat(system, user, temperature=temp)
+        return _sanitize(raw)
+
     def warn_message(self, persona_name, member, word, nth, threshold):
         """违禁词劝告话术。"""
         p = self.cfg.persona(persona_name)

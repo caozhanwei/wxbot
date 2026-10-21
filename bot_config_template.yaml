@@ -29,6 +29,10 @@ kb:                              # 知识库（可选）：群 @机器人 答疑
   - 未提及
   - 无相关内容
   - 未提供
+ocr:                             # 图片识别（可选）：群里图片 OCR 成文字参与理解；不配则图片只显示 [图片]
+  url: http://your-ocr-service.example:18765
+  api_key: your-ocr-api-key
+  timeout: 30
 reply:
   poll_sec: 3
   quiesce_sec: 5

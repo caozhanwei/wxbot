@@ -2,6 +2,7 @@
 """主编排：轮询所有已配置聊天 → 私聊人设回复 / 群答疑 / 群管理 / 管理员命令。"""
 import logging
 import random
+import threading
 import time
 
 from answer import McpKBClient, KBError
@@ -40,6 +41,7 @@ class Bot:
         self.cfg = cfg or BotConfig(cfg_path)
         self.store = Store(paths.resolve(self.cfg.db_file))
         self.driver = driver or WxDriver()
+        self._setup_ocr()
         self.personas = PersonaEngine(self.cfg)
         self._kb = None
         self._kb_writer = None
@@ -53,6 +55,11 @@ class Bot:
         self.state.setdefault("fails", {})
         self.state.setdefault("no_at_last", {})
         self.watch = []
+
+    def _setup_ocr(self):
+        setup = getattr(self.driver, "setup_ocr", None)
+        if callable(setup):
+            setup(self.cfg.ocr_cfg)
 
     # ---------- 基础 ----------
     @property
@@ -126,6 +133,7 @@ class Bot:
                 self.personas.refresh()
                 self._kb = None
                 self._kb_writer = None
+                self._setup_ocr()
                 self.build_watch()
                 log.info("配置已热重载")
             if max_runtime and time.time() - self.state["start"] > max_runtime:
@@ -265,9 +273,27 @@ class Bot:
         if not question:
             self.send(w["display"], f"@{asker} 我在的，@我 直接说问题就行～", "qa")
             return
-        log.info("群答疑 %s: %s", w["display"], question[:60])
+        rc = self.cfg.reply_cfg
         try:
-            answer, hit, grounded = self.kb.ask(question, w["display"])
+            profile = (self.store.get_profile(w["user"], m["sender"]) or {}).get("profile") or ""
+        except Exception:
+            profile = ""
+        standalone, should = question, True
+        try:
+            ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
+            u = self.personas.understand_question(w["display"], ctx, question, asker, profile)
+            standalone, should = u["standalone"], u["should_answer"]
+        except Exception as e:
+            log.warning("提问理解失败(%s)，用原始问题: %s", w["display"], e)
+            ctx = []
+        log.info("群答疑 %s: %s（独立问题: %s）", w["display"], question[:60], standalone[:60])
+        self._refresh_profile_async(w, m["sender"], asker)
+        if not should:
+            # 闲聊/玩笑@机器人：接一句就好，不查库不答题
+            self.send(w["display"], f"@{asker} 哈哈我在呢，有问题随时@我～", "qa")
+            return
+        try:
+            answer, hit, grounded = self.kb.ask(standalone, w["display"])
         except KBError as e:
             log.warning("KB 调用失败: %s", e)
             if time.time() - self.state["kb_fail_ts"] > 600:
@@ -275,10 +301,11 @@ class Bot:
                 self.notify_admins(f"[告警] 知识库调用失败: {e}")
             if qa.get("llm_fallback"):
                 try:
-                    rc = self.cfg.reply_cfg
-                    ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
-                    reply = self.personas.chat_reply(g.get("persona", "通用朋友"),
-                                                     w["display"], ctx, question)
+                    if not ctx:
+                        ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
+                    reply = self.personas.group_answer(g.get("persona", "通用朋友"),
+                                                       w["display"], ctx, standalone,
+                                                       asker, profile=profile)
                     self.send(w["display"], f"@{asker} {reply}", "qa")
                 except Exception as ee:
                     log.warning("LLM 兜底也失败: %s", ee)
@@ -286,12 +313,21 @@ class Bot:
         if hit:
             self.send(w["display"], f"@{asker} {answer}", "qa")
         elif grounded and qa.get("grounded_reply", True):
-            self.store.add_qa_pending(w["display"], asker, question, answer)
+            self.store.add_qa_pending(w["display"], asker, standalone, answer)
             self.send(w["display"], f"@{asker} 知识库没有完全正中的答案，以下是相关内容供参考：\n{answer}", "qa")
         else:
-            self.store.add_qa_pending(w["display"], asker, question)
+            self.store.add_qa_pending(w["display"], asker, standalone)
             self.send(w["display"], f"@{asker} 知识库里暂时没有这个问题的答案，已记录，会有同学跟进～", "qa")
-            self.notify_admins(f"[待沉淀] {w['display']} {asker}: {question[:80]}")
+            self.notify_admins(f"[待沉淀] {w['display']} {asker}: {standalone[:80]}")
+
+    def _refresh_profile_async(self, w, wxid, nickname):
+        """后台线程更新提问者画像，LLM 慢也不挡主循环。"""
+        from . import profiles
+        threading.Thread(
+            target=profiles.update_profile,
+            args=(self.personas, self.store, self.driver,
+                  w["user"], wxid, nickname),
+            daemon=True).start()
 
     def _warn(self, w, m, word):
         mg = w["cfg"].get("manage") or {}
