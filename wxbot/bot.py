@@ -42,6 +42,7 @@ class Bot:
         self.store = Store(paths.resolve(self.cfg.db_file))
         self.driver = driver or WxDriver()
         self._setup_ocr()
+        self._setup_asr()
         self.personas = PersonaEngine(self.cfg)
         self._kb = None
         self._kb_writer = None
@@ -54,12 +55,19 @@ class Bot:
         self.state.setdefault("kb_fail_ts", 0)
         self.state.setdefault("fails", {})
         self.state.setdefault("no_at_last", {})
+        self._last_sent_cache = {}    # display -> (text, ts) 防止同条消息短时间内连发刷屏
         self.watch = []
 
     def _setup_ocr(self):
         setup = getattr(self.driver, "setup_ocr", None)
         if callable(setup):
             setup(self.cfg.ocr_cfg)
+
+    def _setup_asr(self):
+        setup = getattr(self.driver, "setup_asr", None)
+        if callable(setup):
+            asr_cfg = self.cfg.data.get("asr") or {}
+            setup(asr_cfg)
 
     # ---------- 基础 ----------
     @property
@@ -100,17 +108,63 @@ class Bot:
         log.info("监控列表: %s", [(w["display"], w["kind"]) for w in self.watch])
 
     def send(self, display, text, kind="reply"):
-        """统一发送出口：dry_run / 计数 / 落日志。"""
-        text = str(text)
+        """统一发送出口：dry_run / 计数 / 落日志 / 防重复连发。"""
+        text = str(text).strip()
+        if not text:
+            return False
         self.store.log(kind, display, "", text)
         if self.cfg.dry_run:
             log.info("[dry] → %s: %s", display, text[:60])
+            self._last_sent_cache[display] = (text, time.time())
             return True
+
+        # 真机发送去重检查：30秒内禁止对同一会话发送完全相同的消息
+        last_t, last_time = self._last_sent_cache.get(display, ("", 0.0))
+        if text == last_t and (time.time() - last_time < 30.0):
+            log.warning("拦截重复连发 → %s: %s", display, text[:40])
+            return True
+
         ok, why = self.driver.send_text(display, text)
         if ok:
             self.state["sent"] += 1
+            self._last_sent_cache[display] = (text, time.time())
         else:
             log.warning("发送失败 → %s: %s", display, why)
+        return ok
+
+    def send_quote(self, display, text, target_name="", target_content="", kind="qa"):
+        """带气泡引用发送出口：优先原生气泡引用，带去重与降级保护。"""
+        text = str(text).strip()
+        if not text:
+            return False
+        self.store.log(kind, display, target_name, text)
+        if self.cfg.dry_run:
+            log.info("[dry-quote] → %s (@%s): %s", display, target_name, text[:60])
+            self._last_sent_cache[display] = (text, time.time())
+            return True
+
+        last_t, last_time = self._last_sent_cache.get(display, ("", 0.0))
+        if text == last_t and (time.time() - last_time < 30.0):
+            log.warning("拦截重复引用连发 → %s: %s", display, text[:40])
+            return True
+
+        ok, why = self.driver.send_quote(display, text, target_name=target_name, target_content=target_content)
+        if ok:
+            self.state["sent"] += 1
+            self._last_sent_cache[display] = (text, time.time())
+        else:
+            log.warning("引用发送失败 → %s: %s", display, why)
+        return ok
+        if self.cfg.dry_run:
+            log.info("[dry-quote] → %s (@%s): %s", display, target_name, text[:60])
+            self._last_sent_cache[display] = (text, time.time())
+            return True
+        ok, why = self.driver.send_quote(display, text, target_name=target_name, target_content=target_content)
+        if ok:
+            self.state["sent"] += 1
+            self._last_sent_cache[display] = (text, time.time())
+        else:
+            log.warning("引用发送失败 → %s: %s", display, why)
         return ok
 
     def notify_admins(self, text):
@@ -134,6 +188,7 @@ class Bot:
                 self._kb = None
                 self._kb_writer = None
                 self._setup_ocr()
+                self._setup_asr()
                 self.build_watch()
                 log.info("配置已热重载")
             if max_runtime and time.time() - self.state["start"] > max_runtime:
@@ -188,6 +243,7 @@ class Bot:
             self._reply_contact(w, texts)
 
     def _reply_contact(self, w, texts):
+        from . import personas
         rc = self.cfg.reply_cfg
         time.sleep(float(rc.get("quiesce_sec", 5)))          # 合并连发
         more, w["since"] = self.driver.poll(w["user"], w["since"])
@@ -197,11 +253,11 @@ class Bot:
                 texts.append(m)
         last = texts[-1]["content"]
         log.info("私聊 %s: %s", w["display"], last[:60])
-        time.sleep(random.uniform(*[float(x) for x in rc.get("human_delay", (2, 5))]))
         try:
             ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
+            memory = self.store.get_contact_memory(w["user"])
             reply = self.personas.chat_reply(w["cfg"].get("persona", "通用朋友"),
-                                             w["display"], ctx, last)
+                                             w["display"], ctx, last, memory=memory)
         except Exception as e:
             log.warning("LLM 失败(%s): %s", w["display"], e)
             self._rewind_or_drop(w, texts)
@@ -209,10 +265,37 @@ class Bot:
         if not reply:
             self._rewind_or_drop(w, texts)
             return
-        if self.send(w["display"], reply, "reply"):
+
+        # 多气泡切分与拟真打字延迟连发
+        bubbles = personas.split_reply_bubbles(reply)
+        all_ok = True
+        for idx, bubble in enumerate(bubbles):
+            delay = personas.human_delay_for_text(bubble)
+            # 若不是 dry_run 则模拟真人打字等待
+            if not self.cfg.dry_run:
+                time.sleep(min(delay, 4.0 if idx > 0 else 6.0))
+            if not self.send(w["display"], bubble, "reply"):
+                all_ok = False
+                break
+
+        if all_ok:
             self.state["fails"][w["user"]] = 0
+            # 异步提炼并沉淀好友生活事实记忆
+            self._refresh_contact_memory_async(w["user"], w["display"], ctx, reply, memory)
         else:
             self._rewind_or_drop(w, texts)
+
+    def _refresh_contact_memory_async(self, wxid, display, ctx, last_reply, current_mem):
+        def _task():
+            try:
+                lines = ctx + [f"我: {last_reply}"]
+                new_mem = self.personas.extract_contact_memory(display, lines, current_mem)
+                if new_mem and new_mem != current_mem:
+                    self.store.upsert_contact_memory(wxid, new_mem)
+                    log.info("更新联系人 %s 长期记忆: %s", display, new_mem[:40])
+            except Exception as e:
+                log.warning("更新联系人记忆异常 %s: %s", display, e)
+        threading.Thread(target=_task, daemon=True).start()
 
     def _rewind_or_drop(self, w, texts):
         """失败回退水位重试；连续 3 次放弃。"""
@@ -268,10 +351,12 @@ class Bot:
         g = w["cfg"]
         qa = g.get("qa") or {}
         names = self.driver.mention_names(g)
-        question = group_logic.strip_at(m["content"], names)
+        raw_msg_content = m.get("content") or ""
+        question = group_logic.strip_at(raw_msg_content, names)
         asker = m["sender_display"] or m["sender"]
         if not question:
-            self.send(w["display"], f"@{asker} 我在的，@我 直接说问题就行～", "qa")
+            self.send_quote(w["display"], "在呢在呢，有事直接说哈 [呲牙]",
+                            target_name=asker, target_content=raw_msg_content)
             return
         rc = self.cfg.reply_cfg
         try:
@@ -289,8 +374,10 @@ class Bot:
         log.info("群答疑 %s: %s（独立问题: %s）", w["display"], question[:60], standalone[:60])
         self._refresh_profile_async(w, m["sender"], asker)
         if not should:
-            # 闲聊/玩笑@机器人：接一句就好，不查库不答题
-            self.send(w["display"], f"@{asker} 哈哈我在呢，有问题随时@我～", "qa")
+            # 闲聊/玩笑/打趣@机器人：接地气幽默接话，坚决拒绝死板客服模板
+            casual = self.personas.casual_group_reply(
+                g.get("persona", "通用朋友"), w["display"], ctx, asker, question, profile=profile)
+            self.send_quote(w["display"], casual, target_name=asker, target_content=raw_msg_content)
             return
         try:
             answer, hit, grounded = self.kb.ask(standalone, w["display"])
@@ -306,18 +393,27 @@ class Bot:
                     reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                        w["display"], ctx, standalone,
                                                        asker, profile=profile)
-                    self.send(w["display"], f"@{asker} {reply}", "qa")
+                    self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
                 except Exception as ee:
                     log.warning("LLM 兜底也失败: %s", ee)
             return
         if hit:
-            self.send(w["display"], f"@{asker} {answer}", "qa")
+            self.send_quote(w["display"], answer, target_name=asker, target_content=raw_msg_content)
         elif grounded and qa.get("grounded_reply", True):
             self.store.add_qa_pending(w["display"], asker, standalone, answer)
-            self.send(w["display"], f"@{asker} 知识库没有完全正中的答案，以下是相关内容供参考：\n{answer}", "qa")
+            # 消除原始技术文档直接外露：通过人设引擎将参考资料润色为自然对话
+            reply = self.personas.group_answer(g.get("persona", "通用朋友"),
+                                               w["display"], ctx, standalone,
+                                               asker, profile=profile, kb_ref=answer)
+            self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
         else:
             self.store.add_qa_pending(w["display"], asker, standalone)
-            self.send(w["display"], f"@{asker} 知识库里暂时没有这个问题的答案，已记录，会有同学跟进～", "qa")
+            reply = self.personas.group_answer(g.get("persona", "通用朋友"),
+                                               w["display"], ctx, standalone,
+                                               asker, profile=profile)
+            if not reply:
+                reply = "这个我手头暂时没查到准确资料，已帮你记下反馈给群里小伙伴啦～"
+            self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
             self.notify_admins(f"[待沉淀] {w['display']} {asker}: {standalone[:80]}")
 
     def _refresh_profile_async(self, w, wxid, nickname):

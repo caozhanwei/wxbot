@@ -8,7 +8,7 @@ import time
 import yaml
 from flask import Flask, request, redirect, render_template_string
 
-from . import mining, profiles as profiles_mod
+from . import bootstrap, mining, profiles as profiles_mod
 
 log = logging.getLogger("wxbot.web")
 
@@ -20,7 +20,7 @@ _NAV = [("仪表盘", "#top"), ("最近会话", "#recent"), ("私聊联系人", 
         ("群友画像", "#profiles"), ("高级 YAML", "#yaml")]
 
 _PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-{% if mine_status.running or profile_status.running %}<meta http-equiv="refresh" content="5">{% endif %}
+{% if mine_status.running or profile_status.running or bootstrap_status.running %}<meta http-equiv="refresh" content="5">{% endif %}
 <title>微信智能助手控制台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -441,6 +441,16 @@ details summary:hover{color:var(--primary)}
     <div class="card-title">群答疑与管理</div>
     <span class="card-subtitle">支持智能问答、知识库挂载、免@接话、进群欢迎与违禁词秩序维护</span>
   </div>
+  {% if bootstrap_status.running %}
+  <div class="alert alert-warning" style="margin-bottom:12px;display:flex;align-items:center;gap:10px">
+    <span class="status-dot" style="background:#2563eb"></span>
+    <div>
+      <b>🚀 正在全量冷启动导入【{{ bootstrap_status.gname }}】：</b>
+      已提炼画像 <b>{{ bootstrap_status.done_profiles }}</b> / {{ bootstrap_status.total_profiles }}，
+      沉淀问答 <b>{{ bootstrap_status.done_qa }}</b> 条，挖掘历史未解诉求 <b>{{ bootstrap_status.done_pending }}</b> 条...
+    </div>
+  </div>
+  {% endif %}
   {% for g in groups %}
   <form method="post" action="/cfg/group" style="background:var(--surface-sub);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px 16px;margin:10px 0">
     <input type="hidden" name="idx" value="{{ loop.index0 }}">
@@ -452,6 +462,7 @@ details summary:hover{color:var(--primary)}
       <label>群内口吻：</label>
       <select name="persona">{% for p in persona_names %}<option {{ 'selected' if g.persona==p }}>{{ p }}</option>{% endfor %}</select>
       <button class="btn btn-sm btn-primary" formaction="/cfg/group" formmethod="post" name="do" value="save">保存设置</button>
+      <button class="btn btn-sm btn-primary" formaction="/bootstrap" formmethod="post" title="一次性扫描近千条历史消息：批量提炼群友画像、沉淀问答库、发现遗留未解问题">🚀 全量冷启动</button>
       <button class="btn btn-sm btn-danger" formaction="/cfg/group" formmethod="post" name="do" value="del" onclick="return confirm('删除群 {{ g.display }}？')">删除群</button>
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
@@ -573,12 +584,12 @@ details summary:hover{color:var(--primary)}
 <a name="pending"></a>
 <div class="card">
   <div class="card-header">
-    <div class="card-title">待沉淀问题清单</div>
-    <span class="card-subtitle">群内未命中知识库的问题汇总，可复制录入团队知识库</span>
+    <div class="card-title">待沉淀问题与历史未解诉求</div>
+    <span class="card-subtitle">实时群内未命中知识库的问题及冷启动挖掘的历史未解决遗留诉求，可录入知识库或安排跟进</span>
   </div>
   <div class="table-responsive">
     <table>
-      <thead><tr><th style="width:60px">#</th><th style="width:22%">来源群</th><th style="width:18%">提问人</th><th>提问内容</th></tr></thead>
+      <thead><tr><th style="width:60px">#</th><th style="width:20%">来源群</th><th style="width:16%">提问人</th><th>提问/未解诉求内容</th><th>上下文背景</th></tr></thead>
       <tbody>
       {% for q in pending %}
       <tr>
@@ -586,9 +597,19 @@ details summary:hover{color:var(--primary)}
         <td><b>{{ q.grp }}</b></td>
         <td>{{ q.questioner }}</td>
         <td>{{ q.question }}</td>
+        <td class="muted" style="font-size:12px">群答疑未命中</td>
       </tr>
       {% endfor %}
-      {% if not pending %}<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无待沉淀问题</td></tr>{% endif %}
+      {% for p in pending_issues %}
+      <tr>
+        <td class="muted">{{ p.id }}</td>
+        <td><b>{{ p.grp }}</b></td>
+        <td><span class="badge badge-warning">{{ p.asker }}</span></td>
+        <td>{{ p.question }}</td>
+        <td class="muted" style="font-size:12px">{{ p.context }}</td>
+      </tr>
+      {% endfor %}
+      {% if not pending and not pending_issues %}<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无待沉淀问题与未解诉求</td></tr>{% endif %}
       </tbody>
     </table>
   </div>
@@ -874,6 +895,8 @@ def start_web(bot):
             warns=" / ".join(f'{w["chat"]}·{w["member"]}×{w["n"]}'
                              for w in bot.store.warn_counts()[:8]) or "无",
             logs=logs, pending=bot.store.qa_pending(20),
+            pending_issues=bot.store.pending_issues(limit=20),
+            bootstrap_status=bootstrap.status(),
             mine_status=mining.status(), mined=mined, mined_count=bot.store.mined_count(),
             m_group_links=_group_links(m_grp, "m"), m_page_no=m_page, m_pages_n=m_pages,
             m_total=bot.store.mined_count(m_grp or None),
@@ -1222,6 +1245,23 @@ def start_web(bot):
                                         g.get("display") or g.get("id") or "")
         _flash["msg"] = (f"已开始刷新 {g.get('display')} 的群友画像" if ok
                          else "已有画像任务在跑或微信/模型未就绪，稍后再试")
+        return redirect("/")
+
+    @app.post("/bootstrap")
+    def do_bootstrap():
+        if not getattr(bot, "driver", None):
+            return _render(form_error="微信未连接，无法执行冷启动导入")
+        try:
+            g = (bot.cfg.data.get("groups") or [])[int(request.form.get("idx"))]
+        except (TypeError, ValueError, IndexError):
+            return _render(form_error="参数错误")
+        inner = getattr(bot, "_bot", None) or bot
+        limit = int(request.form.get("limit") or 1000)
+        ok = bootstrap.start_bootstrap_async(inner, g.get("id") or "",
+                                             g.get("display") or g.get("id") or "",
+                                             limit=limit)
+        _flash["msg"] = (f"已启动群【{g.get('display')}】历史消息全量冷启动导入（扫描最近 {limit} 条）" if ok
+                         else "已有冷启动任务在运行中，请稍候再试")
         return redirect("/")
 
     @app.post("/config")

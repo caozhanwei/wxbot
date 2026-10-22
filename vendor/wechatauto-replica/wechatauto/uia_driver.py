@@ -1435,6 +1435,18 @@ class WeChatUIA:
                     return True
         return False
 
+    def quote_last_message(self, who: Optional[str] = None, text: str = "") -> bool:
+        """引用当前会话最新一条消息并输入发送内容。"""
+        pos = self._right_click_latest_row(who)
+        if pos is None:
+            return False
+        item = self._uia_find_menu_item("引用")
+        if item is not None:
+            if self._uia_click_menu_item(item):
+                rhythm.nap(0.6)
+                return self.send_text(text)
+        return False
+
     # ------------------------------------------------------------------ 剪贴板粘贴
     def _set_text(self, ctrl, text: str) -> bool:
         """用 UIA ValuePattern 直接写文本：不动鼠标、不发按键，返回是否写成。

@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS kb_sink(
 CREATE TABLE IF NOT EXISTS member_profiles(
     grp TEXT, wxid TEXT, nickname TEXT, profile TEXT,
     updated REAL, PRIMARY KEY(grp, wxid));
+CREATE TABLE IF NOT EXISTS contact_memories(
+    wxid TEXT PRIMARY KEY, memory TEXT, updated REAL);
+CREATE TABLE IF NOT EXISTS pending_issues(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, grp TEXT,
+    asker TEXT, question TEXT, context TEXT, status TEXT DEFAULT 'pending');
 """
 
 
@@ -98,7 +103,13 @@ class Store:
              + " ORDER BY id DESC LIMIT ? OFFSET ?")
         with self._conn() as c:
             rows = c.execute(q, ((grp,) if grp else ()) + (limit, offset)).fetchall()
-            return [dict(r) for r in rows]
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["q"] = d.get("question") or ""
+                d["a"] = d.get("answer") or ""
+                out.append(d)
+            return out
 
     def mined_count(self, grp=None):
         q = "SELECT COUNT(*) n FROM mined" + (" WHERE grp=?" if grp else "")
@@ -129,6 +140,38 @@ class Store:
             c.execute("INSERT INTO kb_sink(chat,seq,ts) VALUES(?,?,?) "
                       "ON CONFLICT(chat) DO UPDATE SET seq=excluded.seq, ts=excluded.ts",
                       (chat, seq, time.time()))
+
+    # ---------- 私聊联系人记忆 ----------
+    def get_contact_memory(self, wxid):
+        with self._conn() as c:
+            row = c.execute("SELECT memory FROM contact_memories WHERE wxid=?", (wxid,)).fetchone()
+            return row["memory"] if row and row["memory"] else ""
+
+    def upsert_contact_memory(self, wxid, memory):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO contact_memories(wxid, memory, updated) VALUES(?,?,?) "
+                "ON CONFLICT(wxid) DO UPDATE SET memory=excluded.memory, updated=excluded.updated",
+                (wxid, str(memory)[:2000], time.time()))
+
+    # ---------- 待解决诉求/历史遗留问题 ----------
+    def add_pending_issue(self, grp, asker, question, context=""):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO pending_issues(ts, grp, asker, question, context) VALUES(?,?,?,?,?)",
+                (time.time(), grp, asker, str(question)[:500], str(context)[:500]))
+
+    def pending_issues(self, grp=None, limit=100, offset=0):
+        q = ("SELECT * FROM pending_issues" + (" WHERE grp=?" if grp else "")
+             + " ORDER BY id DESC LIMIT ? OFFSET ?")
+        with self._conn() as c:
+            rows = c.execute(q, ((grp,) if grp else ()) + (limit, offset)).fetchall()
+            return [dict(r) for r in rows]
+
+    def pending_issues_count(self, grp=None):
+        q = "SELECT COUNT(*) n FROM pending_issues" + (" WHERE grp=?" if grp else "")
+        with self._conn() as c:
+            return c.execute(q, ((grp,) if grp else ())).fetchone()["n"]
 
     # ---------- 成员画像 ----------
     def get_profile(self, grp, wxid):

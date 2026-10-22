@@ -33,6 +33,11 @@ ocr:                             # 图片识别（可选）：群里图片 OCR �
   url: http://your-ocr-service.example:18765
   api_key: your-ocr-api-key
   timeout: 30
+asr:                             # 语音识别（可选）：语音转文字参与理解；不配则语音只显示 [语音]
+  url: https://your-asr-service.example/v1/audio/transcriptions
+  api_key: your-asr-api-key
+  model: whisper-1
+  timeout: 30
 reply:
   poll_sec: 3
   quiesce_sec: 5

@@ -12,11 +12,37 @@ from wechatauto.uia_driver import WeChatUIA
 
 from . import group_logic
 from .ocr import OcrClient
+from .asr import AsrClient
 
 log = logging.getLogger("wxbot.driver")
 
 _SENSITIVE = re.compile(r"\d{15,}|卡号|开户|身份证|密码")
 _SEND_ATTEMPTS = 3
+
+
+def parse_refer_msg(raw_content: str):
+    """解析微信 57 类型的引用消息 XML，提取被引用人、被引用内容与本次回复。"""
+    if not raw_content or "refermsg" not in raw_content:
+        return None
+    try:
+        title_m = re.search(r"<title>(.*?)</title>", raw_content, re.S)
+        reply = title_m.group(1).strip() if title_m else ""
+        name_m = re.search(r"<displayname>(.*?)</displayname>", raw_content, re.S)
+        quoted_user = name_m.group(1).strip() if name_m else "群友"
+        refer_block = re.search(r"<refermsg>(.*?)</refermsg>", raw_content, re.S)
+        quoted_content = ""
+        if refer_block:
+            c_m = re.search(r"<content>(.*?)</content>", refer_block.group(1), re.S)
+            if c_m:
+                quoted_content = c_m.group(1).strip()
+        return {
+            "is_quote": True,
+            "reply": reply,
+            "quoted_user": quoted_user,
+            "quoted_content": quoted_content,
+        }
+    except Exception:
+        return None
 
 
 class WxDriver:
@@ -29,10 +55,13 @@ class WxDriver:
         self.self_id = info.get("username") or info.get("wxid") or ""
         self.self_name = info.get("nick_name") or info.get("nickname") or self.self_id
         self.ocr = OcrClient(None)   # 未配置；Bot 启动时 setup_ocr() 注入
+        self.asr = AsrClient(None)   # 未配置；Bot 启动时 setup_asr() 注入
         self._media = None
         self._ocr_cache = {}         # (user, local_id) -> 识别文字（''=已试过没有/失败）
-        log.info("驱动就绪 self=%s(%s) ocr=%s", self.self_id, self.self_name,
-                 "on" if self.ocr.ready else "off")
+        self._voice_cache = {}       # (user, local_id) -> 转录文字（''=已试过没有/失败）
+        log.info("驱动就绪 self=%s(%s) ocr=%s asr=%s", self.self_id, self.self_name,
+                 "on" if self.ocr.ready else "off",
+                 "on" if self.asr.ready else "off")
 
     def setup_ocr(self, ocr_cfg):
         """按配置启用/重建 OCR 客户端（热重载后可再调）；清空识别缓存。"""
@@ -41,6 +70,15 @@ class WxDriver:
             self._ocr_cache.clear()
         self.ocr = client
         log.info("OCR %s（url=%s）", "已启用" if client.ready else "未配置，图片降级为占位",
+                 client.url or "-")
+
+    def setup_asr(self, asr_cfg):
+        """按配置启用/重建 ASR 客户端；清空转写缓存。"""
+        client = AsrClient(asr_cfg)
+        if client.ready != self.asr.ready or getattr(client, "url", "") != self.asr.url:
+            self._voice_cache.clear()
+        self.asr = client
+        log.info("ASR %s（url=%s）", "已启用" if client.ready else "未配置，语音降级为占位",
                  client.url or "-")
 
     # ---------- 联系人解析 ----------
@@ -136,6 +174,13 @@ class WxDriver:
                 elif sender:
                     # 行内无发送者：从正文前缀取
                     item["sender"], item["content"] = sender, body
+            ref = parse_refer_msg(item["content"])
+            if ref:
+                item["is_quote"] = True
+                item["quoted_user"] = ref["quoted_user"]
+                item["quoted_content"] = ref["quoted_content"]
+                if ref["reply"]:
+                    item["content"] = ref["reply"]
             item["sender_display"] = self.display_of(item["sender"]) if item["sender"] else ""
             out.append(item)
         return out, since
@@ -188,6 +233,30 @@ class WxDriver:
         self._ocr_cache[key] = text
         return text
 
+    def voice_text(self, user_id, local_id):
+        """解密群/私聊语音并送 ASR 转写；结果缓存，未配置/失败返回空串。"""
+        if not local_id:
+            return ""
+        key = (user_id, local_id)
+        if key in self._voice_cache:
+            return self._voice_cache[key]
+        text = ""
+        try:
+            save_dir = os.path.join(tempfile.gettempdir(), "wxbot_voice")
+            if not self._media:
+                self._media = MediaDownloader(self.db, save_dir=save_dir)
+            path = self._media.download_voice(user_id, local_id, save_dir)
+            if path and os.path.isfile(path):
+                with open(path, "rb") as f:
+                    data = f.read()
+                text = self.asr.transcribe(data, filename=os.path.basename(path)) or ""
+        except Exception as e:
+            log.info("语音转写失败 %s#%s: %s", user_id, local_id, e)
+        if text:
+            log.info("语音转写成功 %s#%s: %s", user_id, local_id, text[:60])
+        self._voice_cache[key] = text
+        return text
+
     def member_lines(self, user_id, wxid, limit=20):
         """某成员在会话里的最近发言（_friendly 规整、脱敏、图片 OCR）。"""
         msgs = self.db.get_messages(user_id, limit=200)
@@ -210,14 +279,20 @@ class WxDriver:
 
     def _friendly(self, m, user_id=None):
         c = (m.get("content") or "").strip()
-        if c.startswith("<?xml"):
+        mtype = str(m.get("type") or "")
+        if mtype == "voice" or m.get("local_type") == 34:
+            txt = self.voice_text(user_id, m.get("local_id")) if user_id and hasattr(self, "voice_text") else ""
+            return f"[语音:{txt[:60]}]" if txt else "[语音]"
+        ref = parse_refer_msg(c)
+        if ref:
+            q_user = ref["quoted_user"]
+            q_txt = ref["quoted_content"].replace("\n", " ")[:50]
+            rep = ref["reply"].replace("\n", " ")[:80]
+            return f'[引用 {q_user}: "{q_txt}"] {rep}'
+        if c.startswith("<?xml") or "<msg>" in c:
             if "<img" in c:
                 text = self.image_text(user_id, m.get("local_id")) if user_id else ""
                 return f"[图片:{text[:60]}]" if text else "[图片]"
-        c = (m.get("content") or "").strip()
-        if c.startswith("<?xml"):
-            if "<img" in c:
-                return "[图片]"
             t = re.search(r"<title>(.*?)</title>", c, re.S)
             return f"[链接:{t.group(1)[:20]}]" if t else "[卡片消息]"
         c = c.replace("\n", " ")
@@ -246,3 +321,17 @@ class WxDriver:
                 why = f"异常: {type(e).__name__}: {e}"
             time.sleep(3)
         return False, f"{why}（重试{_SEND_ATTEMPTS}次后放弃）"
+
+    def send_quote(self, display, text, target_name="", target_content=""):
+        """带气泡引用发送，优先尝试 UIA 右键菜单「引用」，失败时安全降级为带前缀发送。"""
+        try:
+            if hasattr(self.uia, "quote_last_message"):
+                if self.uia.quote_last_message(display, text):
+                    return True, "ok"
+        except Exception as e:
+            log.warning("原生引用发送异常，降级发送: %s", e)
+        prefix = f"「回复 @{target_name}」" if target_name else "「引用回复」"
+        return self.send_text(display, f"{prefix} {text}")
+
+
+WeChatDriver = WxDriver
