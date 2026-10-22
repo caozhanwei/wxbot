@@ -27,6 +27,7 @@ dist/
 WeChatSetup*.exe
 build/*
 !build/gen_files.py
+!build/gen_icon.py
 !build/product.wxs
 !build/app.ico
 .git_disabled/

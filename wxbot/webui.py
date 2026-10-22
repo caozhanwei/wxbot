@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """Web 控制台（桌面窗口承载）：可视化配置（联系人/人设/群/模型/知识库）、状态、日志。"""
 import html
+import json
 import logging
 import threading
 import time
+from urllib.parse import quote
 
 import yaml
-from flask import Flask, request, redirect, render_template_string
+from flask import Flask, Response, request, redirect, render_template_string
 
 from . import bootstrap, mining, profiles as profiles_mod
 
@@ -462,7 +464,8 @@ details summary:hover{color:var(--primary)}
       <label>群内口吻：</label>
       <select name="persona">{% for p in persona_names %}<option {{ 'selected' if g.persona==p }}>{{ p }}</option>{% endfor %}</select>
       <button class="btn btn-sm btn-primary" formaction="/cfg/group" formmethod="post" name="do" value="save">保存设置</button>
-      <button class="btn btn-sm btn-primary" formaction="/bootstrap" formmethod="post" title="一次性扫描近千条历史消息：批量提炼群友画像、沉淀问答库、发现遗留未解问题">🚀 全量冷启动</button>
+      <button class="btn btn-sm btn-primary" formaction="/bootstrap" formmethod="post" title="一次性扫描历史消息：批量提炼群友画像、沉淀问答库、发现遗留未解问题（手机聊天记录迁移到电脑后可扫到更早历史）">🚀 全量冷启动</button>
+      <input type="number" name="limit" value="1000" min="100" max="10000" step="100" style="width:74px" title="扫描最近多少条历史消息（100~10000，条数越多耗时越久）"> 条
       <button class="btn btn-sm btn-danger" formaction="/cfg/group" formmethod="post" name="do" value="del" onclick="return confirm('删除群 {{ g.display }}？')">删除群</button>
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
@@ -702,6 +705,17 @@ details summary:hover{color:var(--primary)}
     </form>
     {% endfor %}
     <span class="muted" style="margin-left:auto">取群活跃成员深度提炼（同一人至少间隔 1 小时重算防刷）</span>
+  </div>
+
+  <div class="row" style="margin-bottom:12px;gap:8px;align-items:center;background:var(--surface-sub);padding:8px 12px;border-radius:var(--radius-sm);border:1px solid var(--border)">
+    <b style="white-space:nowrap">跨账号迁移</b>
+    <span class="muted" style="font-size:12px">换微信号登录后，把旧账号的画像/私聊记忆/问答沉淀搬过来</span>
+    <a href="/knowledge/export" class="btn btn-sm btn-primary" style="margin-left:auto;text-decoration:none">⬇ 导出全部（JSON）</a>
+    <form method="post" action="/knowledge/import" enctype="multipart/form-data" style="display:inline-flex;align-items:center;gap:6px">
+      <input type="file" name="file" accept=".json" required style="font-size:12px;max-width:220px">
+      <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px"><input type="checkbox" name="overwrite" value="1">覆盖已有</label>
+      <button class="btn btn-sm">⬆ 导入</button>
+    </form>
   </div>
 
   <div class="chip-group">
@@ -1256,12 +1270,40 @@ def start_web(bot):
         except (TypeError, ValueError, IndexError):
             return _render(form_error="参数错误")
         inner = getattr(bot, "_bot", None) or bot
-        limit = int(request.form.get("limit") or 1000)
+        limit = min(10000, max(100, int(request.form.get("limit") or 1000)))
         ok = bootstrap.start_bootstrap_async(inner, g.get("id") or "",
                                              g.get("display") or g.get("id") or "",
                                              limit=limit)
         _flash["msg"] = (f"已启动群【{g.get('display')}】历史消息全量冷启动导入（扫描最近 {limit} 条）" if ok
                          else "已有冷启动任务在运行中，请稍候再试")
+        return redirect("/")
+
+    @app.route("/knowledge/export")
+    def knowledge_export():
+        data = bot.store.export_knowledge(
+            source_wxid=(bot.cfg.data.get("app") or {}).get("self_wxid") or "")
+        body = json.dumps(data, ensure_ascii=False, indent=1)
+        fname = quote(time.strftime("wxbot_knowledge_%Y%m%d_%H%M%S.json"))
+        return Response(body, mimetype="application/json",
+                        headers={"Content-Disposition":
+                                 f"attachment; filename*=UTF-8''{fname}"})
+
+    @app.post("/knowledge/import")
+    def knowledge_import():
+        f = request.files.get("file")
+        overwrite = bool(request.form.get("overwrite"))
+        try:
+            data = json.loads(f.read().decode("utf-8")) if f else None
+            if not isinstance(data, dict):
+                raise ValueError("文件内容不是有效的导出 JSON")
+            counts = bot.store.import_knowledge(data, overwrite=overwrite)
+        except Exception as e:
+            _flash["msg"] = f"导入失败：{html.escape(str(e))}"
+            return redirect("/")
+        _flash["msg"] = (f"导入完成：群友画像 {counts['profiles']} 条、"
+                         f"私聊记忆 {counts['memories']} 条、"
+                         f"问答沉淀 {counts['mined_qa']} 条"
+                         "（已存在且未勾选覆盖的条目跳过）")
         return redirect("/")
 
     @app.post("/config")

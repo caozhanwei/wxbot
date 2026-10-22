@@ -207,3 +207,66 @@ class Store:
             rows = c.execute(
                 "SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
+
+    # ---------- 知识资产导入导出（跨账号迁移） ----------
+    def export_knowledge(self, source_wxid=""):
+        """导出群友画像 + 私聊长期记忆 + 挖掘问答为可迁移 dict。"""
+        with self._conn() as c:
+            prof = [dict(r) for r in c.execute(
+                "SELECT grp,wxid,nickname,profile FROM member_profiles "
+                "ORDER BY grp,wxid")]
+            mem = [dict(r) for r in c.execute(
+                "SELECT wxid,memory FROM contact_memories ORDER BY wxid")]
+            qa = [dict(r) for r in c.execute(
+                "SELECT grp,question,answer FROM mined ORDER BY id")]
+        return {"wxbot_export": 1, "exported_at": time.time(),
+                "source_wxid": source_wxid,
+                "member_profiles": prof, "contact_memories": mem,
+                "mined_qa": qa}
+
+    def import_knowledge(self, data, overwrite=False):
+        """导入 export_knowledge 产物；同键已有数据时 overwrite=True 才覆盖。
+        返回各资产实际写入条数。"""
+        n = {"profiles": 0, "memories": 0, "mined_qa": 0}
+        if not isinstance(data, dict):
+            return n
+        with self._lock, self._conn() as c:
+            for p in data.get("member_profiles") or []:
+                if not isinstance(p, dict) or not (p.get("grp") and p.get("wxid")):
+                    continue
+                if not overwrite and c.execute(
+                        "SELECT 1 FROM member_profiles WHERE grp=? AND wxid=?",
+                        (p["grp"], p["wxid"])).fetchone():
+                    continue
+                c.execute(
+                    "INSERT INTO member_profiles(grp,wxid,nickname,profile,updated) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(grp,wxid) DO UPDATE SET "
+                    "nickname=excluded.nickname, profile=excluded.profile, "
+                    "updated=excluded.updated",
+                    (p["grp"], p["wxid"], str(p.get("nickname") or "")[:100],
+                     str(p.get("profile") or "")[:2000], time.time()))
+                n["profiles"] += 1
+            for m in data.get("contact_memories") or []:
+                if not isinstance(m, dict) or not m.get("wxid"):
+                    continue
+                if not overwrite and c.execute(
+                        "SELECT 1 FROM contact_memories WHERE wxid=?",
+                        (m["wxid"],)).fetchone():
+                    continue
+                c.execute(
+                    "INSERT INTO contact_memories(wxid,memory,updated) VALUES(?,?,?) "
+                    "ON CONFLICT(wxid) DO UPDATE SET memory=excluded.memory, "
+                    "updated=excluded.updated",
+                    (m["wxid"], str(m.get("memory") or "")[:2000], time.time()))
+                n["memories"] += 1
+            for q in data.get("mined_qa") or []:
+                if not isinstance(q, dict) or not q.get("question"):
+                    continue
+                if c.execute("SELECT 1 FROM mined WHERE grp=? AND question=?",
+                             ((q.get("grp") or ""), str(q["question"])[:200])).fetchone():
+                    continue
+                c.execute("INSERT INTO mined(ts,grp,question,answer) VALUES(?,?,?,?)",
+                          (time.time(), q.get("grp") or "",
+                           str(q["question"])[:200], str(q.get("answer") or "")[:400]))
+                n["mined_qa"] += 1
+        return n
