@@ -14,330 +14,723 @@ log = logging.getLogger("wxbot.web")
 
 _PAGE_SIZE = 20   # 画像/问答库浏览页大小
 
-_NAV = [("状态", "#top"), ("最近会话", "#recent"), ("联系人", "#contacts"),
-        ("人设", "#personas"), ("群", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
-        ("日志", "#logs"), ("待沉淀", "#pending"), ("挖掘", "#mine"),
-        ("群友画像", "#profiles"), ("YAML", "#yaml")]
+_NAV = [("仪表盘", "#top"), ("最近会话", "#recent"), ("私聊联系人", "#contacts"),
+        ("人设库", "#personas"), ("群管理与答疑", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
+        ("运行日志", "#logs"), ("待沉淀问题", "#pending"), ("群历史挖掘", "#mine"),
+        ("群友画像", "#profiles"), ("高级 YAML", "#yaml")]
 
-_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+_PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 {% if mine_status.running or profile_status.running %}<meta http-equiv="refresh" content="5">{% endif %}
-<title>微信智能助手</title><style>
-body{font-family:"Microsoft YaHei",sans-serif;margin:20px 28px;background:#f5f6f8;color:#222}
-h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:14px 0 8px}
-nav a{margin-right:12px;font-size:13px;color:#0a5;text-decoration:none}
-.card{background:#fff;border:1px solid #e2e4e8;border-radius:8px;padding:12px 16px;margin:10px 0}
-table{border-collapse:collapse;width:100%;font-size:13px}
-td,th{padding:4px 6px;border-bottom:1px solid #eee;text-align:left;vertical-align:middle}
-input[type=text],input[type=password],input[type=number],select{padding:3px 6px;border:1px solid #ccd0d6;border-radius:4px;font-size:13px}
-input[type=text]{min-width:120px}
-.on{color:#1a7f37;font-weight:bold}.off{color:#c93c37}
-button{margin:2px;padding:3px 12px;font-size:12px;cursor:pointer}
-.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
-.row label{font-size:13px;color:#555;min-width:90px}
-.muted{color:#777;font-size:12px}
-.err{color:#c93c37;font-weight:bold}.ok{color:#1a7f37}
-textarea{width:98%;padding:6px;border:1px solid #ccd0d6;border-radius:4px;font-family:inherit;font-size:13px}
-details summary{cursor:pointer;font-weight:bold;font-size:14px}
-</style></head><body id="top">
-<h1>微信智能助手 <span class="muted">{{ self_name }} · {{ state }} · 已发送 {{ sent }} 条 · 运行 {{ uptime }} 分钟</span></h1>
-<nav>{% for n, h in nav %}<a href="{{ h }}">{{ n }}</a>{% endfor %}</nav>
-
-{% if error %}<div class="card" style="border-color:#c93c37">
-<b class="err">助手未运行：{{ error }}</b>
-<form method="post" action="/retry"><button>重试启动</button></form>
-<p class="muted">请确认微信 PC 版已登录且主窗口存在，然后点重试。</p></div>{% endif %}
-
-{% if flash %}<div class="card"><span class="ok">{{ flash }}</span></div>{% endif %}
-{% if form_error %}<div class="card"><span class="err">{{ form_error }}</span>
-{% if candidates %}<p class="muted">最近会话里找到这些相似的，点一下直接加：</p>
-{% for r in candidates %}<form method="post" action="/cfg/pick" class="row">
-  <input type="hidden" name="id" value="{{ r.id }}">
-  <input type="hidden" name="display" value="{{ r.display }}">
-  <input type="hidden" name="kind" value="{{ 'group' if r.is_group else 'contact' }}">
-  <b style="min-width:150px">{{ r.display }}</b>
-  <span class="muted" style="min-width:250px">{{ r.id }}{{ ' ·群' if r.is_group }}</span>
-  <button>加为{{ '群' if r.is_group else '联系人' }}</button>
-</form>{% endfor %}{% endif %}
-</div>{% endif %}
-
-{% if not setup_done %}<div class="card" style="border-color:#e8a33d;background:#fffbe8">
-<h2>🚀 首次使用向导</h2>
-<ol style="margin:6px 0 10px;font-size:13px">
-  <li>确认微信 PC 版已登录（顶部状态显示：<b>{{ self_name }}</b>，不是"未连接"即可）</li>
-  <li>填模型接口（自动回复要靠它生成消息）：<b>地址 + API Key + 模型名</b> 三样都填好 → 保存</li>
-  <li>到下面的 <a href="#recent">最近会话</a> 卡片，搜索后点"加为联系人/加为群"，把要接管的会话加进来</li>
-</ol>
-<form method="post" action="/setup/llm" class="row">
-  <label>模型接口地址</label><input type="text" name="base_url" value="{{ llm.base_url or '' }}" style="min-width:280px" placeholder="https://your-llm-gateway.example/v1">
-  <label>API Key</label><input type="password" name="api_key" style="min-width:180px" placeholder="sk-…">
-  <label>模型名</label><input type="text" name="model" style="min-width:130px">
-  <button>保存模型设置</button>
-</form>
-<form method="post" action="/setup/llm" class="row">
-  <label>知识库地址（可选，群答疑用）</label><input type="text" name="kb_url" style="min-width:260px">
-  <label>知识库 Key（可选）</label><input type="text" name="kb_key" style="min-width:170px">
-  <button>保存知识库设置</button>
-</form>
-<form method="post" action="/setup/done" class="row">
-  <button>✔ 完成，进入控制台</button>
-  <span class="muted">当前为演示模式（只记日志不真正发送）；都配好后去"模型与节奏"把演示模式关掉才真正回复</span>
-</form>
-</div>{% endif %}
-
-<div class="card">
-<form method="post" class="row">
-  <button formaction="/pause" formmethod="post">{{ '恢复自动回复' if paused else '暂停自动回复' }}</button>
-  <button formaction="/reload" formmethod="post">从文件重载配置</button>
-  <span class="muted">所有保存操作立即生效（热重载）</span>
-</form></div>
-
-<a name="recent"></a><div class="card"><h2>最近会话（点开过的聊天都在这，直接点加，不用查 id）</h2>
-{% if recent %}
-<div class="row">
-  <input type="text" id="recentQ" placeholder="🔍 输入昵称/群名关键字过滤…" oninput="filterRecent(this.value)"
-         style="min-width:240px"><span class="muted" id="recentCount"></span>
-</div>
-<table id="recentT"><thead><tr><th style="width:26%">昵称/群名</th><th>微信id</th><th>类型</th><th>操作</th></tr></thead>
-<tbody id="recentB">
-{% for r in recent %}{% set _s = ((r.display or '') ~ ' ' ~ (r.id or '')) | lower %}
-<tr data-s="{{ _s }}"><td>{{ r.display or '(空昵称)' }}</td><td class="muted">{{ r.id }}</td>
-<td>{{ '群' if r.is_group else '私聊' }}</td><td>
-{% if r.id in cfg_ids %}<span class="muted">已配置</span>
-{% else %}<form method="post" action="/cfg/pick" style="margin:0">
-  <input type="hidden" name="id" value="{{ r.id }}">
-  <input type="hidden" name="display" value="{{ r.display or r.id }}">
-  <input type="hidden" name="kind" value="{{ 'group' if r.is_group else 'contact' }}">
-  <button>加为{{ '群' if r.is_group else '联系人' }}</button>
-</form>{% endif %}
-</td></tr>{% endfor %}
-</tbody></table>
-<p class="muted">列表来自微信"最近聊天"，没有的会话先在微信里点开一次就会出现在这里。API 形式：<code>/api/sessions?q=关键字</code></p>
-<script>
-function filterRecent(q){
-  q=(q||'').trim().toLowerCase();
-  var rows=document.getElementById('recentB').rows, n=0;
-  for(var i=0;i<rows.length;i++){
-    var hit=!q||rows[i].getAttribute('data-s').indexOf(q)>=0;
-    rows[i].style.display=hit?'':'none'; if(hit)n++;
-  }
-  document.getElementById('recentCount').textContent=n+' 个会话';
+<title>微信智能助手控制台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --primary:#07c160;--primary-hover:#06ae56;--primary-light:#e8f7ee;
+  --bg:#f4f6f9;--surface:#ffffff;--surface-sub:#f9fafb;
+  --border:#e5e7eb;--border-hover:#d1d5db;
+  --text-main:#111827;--text-sub:#4b5563;--text-muted:#9ca3af;
+  --danger:#ef4444;--danger-light:#fef2f2;--danger-hover:#dc2626;
+  --warning:#f59e0b;--warning-light:#fffbeb;
+  --radius-sm:6px;--radius-md:10px;--radius-lg:14px;
+  --shadow-sm:0 1px 2px 0 rgba(0,0,0,0.05);
+  --shadow-md:0 4px 6px -1px rgba(0,0,0,0.07),0 2px 4px -2px rgba(0,0,0,0.05);
+  --shadow-lg:0 10px 15px -3px rgba(0,0,0,0.08),0 4px 6px -4px rgba(0,0,0,0.04);
 }
-filterRecent('');
-</script>
-{% else %}<p class="muted">{{ '微信未连接，连上后这里会列出最近会话' if not driver_up else '最近会话为空：先在微信里点开几个聊天' }}</p>{% endif %}
-</div>
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--text-main);
+  line-height:1.5;padding-bottom:60px;-webkit-font-smoothing:antialiased;
+}
 
-<a name="contacts"></a><div class="card"><h2>私聊联系人（白名单：勾选"启用"的才会 AI 自动回复）</h2>
-{% for c in contacts %}
-<form method="post" action="/cfg/contact" class="row" style="border-bottom:1px dashed #e5e5e5;padding:6px 0">
-  <input type="hidden" name="idx" value="{{ loop.index0 }}">
-  <label class="{{ 'on' if c.enabled else 'off' }}">{{ '● 启用' if c.enabled else '○ 停用' }}</label>
-  <input type="checkbox" name="enabled" {{ 'checked' if c.enabled }} title="启用">
-  <input type="text" name="display" value="{{ c.display or '' }}" style="min-width:110px" placeholder="昵称">
-  <input type="text" name="id" value="{{ c.id or '' }}" style="min-width:220px" placeholder="微信号/wxid">
-  <select name="persona">{% for p in persona_names %}<option {{ 'selected' if c.persona==p }}>{{ p }}</option>{% endfor %}</select>
-  <button name="action" value="save">保存</button>
-  <button name="action" value="del" onclick="return confirm('删除联系人 {{ c.display }}？')">删除</button>
-</form>
-{% endfor %}
-<form method="post" action="/cfg/contact" class="row" style="padding-top:8px">
-  <input type="hidden" name="action" value="new">
-  <label>新增：</label><input type="text" name="display" placeholder="昵称（必填）">
-  <input type="text" name="id" placeholder="微信号/wxid（可空自动反查）">
-  <select name="persona">{% for p in persona_names %}<option>{{ p }}</option>{% endfor %}</select>
-  <button>添加联系人</button>
-</form>
-<p class="muted">不知道微信号就先只填昵称，保存后系统自动反查。</p>
-</div>
+/* 顶部导航吸顶栏 */
+.top-header{
+  position:sticky;top:0;z-index:100;
+  background:rgba(255,255,255,0.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border);box-shadow:var(--shadow-sm);
+  padding:10px 24px;
+}
+.header-inner{max-width:1380px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-icon{
+  width:32px;height:32px;background:var(--primary);color:#fff;
+  border-radius:8px;display:flex;align-items:center;justify-content:center;
+  font-weight:bold;font-size:18px;box-shadow:0 2px 6px rgba(7,193,96,0.3);
+}
+.brand h1{font-size:17px;font-weight:700;color:var(--text-main);letter-spacing:-0.2px}
+.brand-status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-sub);background:var(--surface-sub);padding:3px 10px;border-radius:20px;border:1px solid var(--border)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:#10b981;box-shadow:0 0 0 2px rgba(16,185,129,0.2)}
+.status-dot.paused{background:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,0.2)}
+.status-dot.offline{background:#ef4444;box-shadow:0 0 0 2px rgba(239,68,68,0.2)}
 
-<a name="personas"></a><div class="card"><h2>人设库（语气与背景，联系人/群引用）</h2>
-{% for name, p in personas.items() %}
-<form method="post" action="/cfg/persona" class="row" style="border-bottom:1px dashed #e5e5e5;padding:6px 0">
-  <input type="hidden" name="old_name" value="{{ name }}">
-  <b style="min-width:110px">{{ name }}</b>
-  <input type="text" name="name" value="{{ name }}" style="min-width:110px" title="改名会同步更新引用">
-  <input type="text" name="style" value="{{ p.style or '' }}" style="flex:1;min-width:280px" placeholder="说话风格">
-  <input type="text" name="background" value="{{ p.background or '' }}" style="flex:1.4;min-width:280px" placeholder="背景/关系">
-  <button name="do" value="save">保存</button>
-  <button name="do" value="del" onclick="return confirm('删除人设 {{ name }}？引用它的联系人将退回默认风格')">删除</button>
-</form>
-{% endfor %}
-<form method="post" action="/cfg/persona" class="row" style="padding-top:8px">
-  <input type="hidden" name="old_name" value="">
-  <label>新增：</label><input type="text" name="name" placeholder="人设名（必填）">
-  <input type="text" name="style" placeholder="说话风格" style="flex:1;min-width:240px">
-  <input type="text" name="background" placeholder="背景/关系" style="flex:1;min-width:240px">
-  <button name="do" value="save">添加人设</button>
-</form>
-</div>
+/* 快捷导航药丸 */
+nav.nav-tabs{max-width:1380px;margin:12px auto 0;padding:0 24px;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
+nav.nav-tabs::-webkit-scrollbar{display:none}
+nav.nav-tabs a{
+  display:inline-flex;align-items:center;white-space:nowrap;
+  padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500;
+  color:var(--text-sub);background:var(--surface);border:1px solid var(--border);
+  text-decoration:none;transition:all 0.15s ease;
+}
+nav.nav-tabs a:hover{color:var(--primary);border-color:var(--primary);background:var(--primary-light)}
 
-<a name="groups"></a><div class="card"><h2>群（答疑 + 管理）</h2>
-{% for g in groups %}
-<form method="post" action="/cfg/group" style="border:1px solid #e8eaee;border-radius:6px;padding:10px;margin:8px 0">
-  <input type="hidden" name="idx" value="{{ loop.index0 }}">
-  <div class="row">
-    <label class="{{ 'on' if g.enabled else 'off' }}">{{ '● 启用' if g.enabled else '○ 停用' }}</label>
-    <input type="checkbox" name="enabled" {{ 'checked' if g.enabled }}>
-    <input type="text" name="display" value="{{ g.display or '' }}" placeholder="群名（用于搜索打开）">
-    <input type="text" name="id" value="{{ g.id or '' }}" placeholder="群id（可空，按群名自动匹配）" style="min-width:220px">
-    <label>群内口吻</label><select name="persona">{% for p in persona_names %}<option {{ 'selected' if g.persona==p }}>{{ p }}</option>{% endfor %}</select>
-    <button formaction="/cfg/group" formmethod="post" name="do" value="save">保存</button>
-    <button formaction="/cfg/group" formmethod="post" name="do" value="del" onclick="return confirm('删除群 {{ g.display }}？')">删除</button>
+/* 主体容器 */
+.container{max-width:1380px;margin:16px auto;padding:0 24px}
+
+/* 顶部状态统计仪表盘 Grid */
+.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:16px}
+.metric-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);
+  padding:14px 18px;display:flex;align-items:center;justify-content:space-between;
+  box-shadow:var(--shadow-sm);transition:transform 0.15s ease,box-shadow 0.15s ease;
+}
+.metric-card:hover{transform:translateY(-1px);box-shadow:var(--shadow-md)}
+.metric-info{display:flex;flex-direction:column}
+.metric-label{font-size:12px;color:var(--text-muted);font-weight:500;margin-bottom:2px}
+.metric-value{font-size:20px;font-weight:700;color:var(--text-main);letter-spacing:-0.5px}
+.metric-sub{font-size:11px;color:var(--text-sub);margin-top:2px}
+.metric-badge{font-size:24px;opacity:0.85}
+
+/* 通用卡片 */
+.card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+  padding:18px 20px;margin:16px 0;box-shadow:var(--shadow-sm);
+  transition:box-shadow 0.15s ease;
+}
+.card:hover{box-shadow:var(--shadow-md)}
+.card-header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:14px}
+.card-title{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--text-main)}
+.card-title::before{content:"";display:inline-block;width:3px;height:14px;background:var(--primary);border-radius:2px}
+.card-subtitle{font-size:12px;color:var(--text-muted);font-weight:normal}
+
+/* 表单与输入框 */
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0}
+.row label{font-size:13px;font-weight:500;color:var(--text-sub);display:inline-flex;align-items:center;gap:4px}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  padding:7px 11px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  font-size:13px;color:var(--text-main);background:#fff;
+  transition:border-color 0.15s ease,box-shadow 0.15s ease;
+}
+input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,select:focus,textarea:focus{
+  outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(7,193,96,0.15);
+}
+input[type=checkbox]{
+  width:16px;height:16px;accent-color:var(--primary);cursor:pointer;
+  vertical-align:middle;border-radius:4px;
+}
+textarea{width:100%;font-family:Consolas,Monaco,monospace;line-height:1.5;min-height:160px;resize:vertical}
+
+/* 按钮规范 */
+button,.btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  gap:5px;padding:7px 14px;font-size:12.5px;font-weight:600;
+  border-radius:var(--radius-sm);border:1px solid var(--border);
+  background:#fff;color:var(--text-main);cursor:pointer;
+  transition:all 0.15s ease;text-decoration:none;line-height:1.2;
+}
+button:hover,.btn:hover{background:var(--surface-sub);border-color:var(--border-hover)}
+button:active,.btn:active{transform:scale(0.98)}
+button.btn-primary,.btn-primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+button.btn-primary:hover,.btn-primary:hover{background:var(--primary-hover);border-color:var(--primary-hover);box-shadow:0 2px 6px rgba(7,193,96,0.25)}
+button.btn-danger,.btn-danger{background:#fff;color:var(--danger);border-color:#fca5a5}
+button.btn-danger:hover,.btn-danger:hover{background:var(--danger-light);border-color:var(--danger)}
+.btn-sm{padding:4px 9px;font-size:12px}
+
+/* 状态标签 Badge */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:12px;font-size:11.5px;font-weight:600}
+.badge-success,.on{background:var(--primary-light);color:#059669;font-weight:600}
+.badge-danger,.off{background:var(--danger-light);color:var(--danger);font-weight:600}
+.badge-warning{background:var(--warning-light);color:#d97706}
+.badge-neutral{background:var(--surface-sub);color:var(--text-sub);border:1px solid var(--border)}
+
+/* 提示卡 */
+.alert{padding:12px 16px;border-radius:var(--radius-md);margin:12px 0;display:flex;align-items:center;gap:10px;font-size:13px}
+.alert-success{background:var(--primary-light);border:1px solid #a7f3d0;color:#065f46}
+.alert-danger{background:var(--danger-light);border:1px solid #fecaca;color:#991b1b}
+.alert-warning{background:var(--warning-light);border:1px solid #fde68a;color:#92400e}
+
+/* 表格规范 */
+.table-responsive{overflow-x:auto;margin:10px 0}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;text-align:left}
+th{background:var(--surface-sub);color:var(--text-sub);font-weight:600;padding:10px 12px;border-bottom:1px solid var(--border);border-top:1px solid var(--border)}
+th:first-child{border-top-left-radius:var(--radius-sm);border-left:1px solid var(--border)}
+th:last-child{border-top-right-radius:var(--radius-sm);border-right:1px solid var(--border)}
+td{padding:10px 12px;border-bottom:1px solid #f0f2f5;color:var(--text-main);vertical-align:middle;word-break:break-word}
+td:first-child{border-left:1px solid transparent}
+td:last-child{border-right:1px solid transparent}
+tr:hover td{background:#fafbfc}
+tr:last-child td{border-bottom:1px solid var(--border)}
+tr:last-child td:first-child{border-bottom-left-radius:var(--radius-sm);border-left:1px solid var(--border)}
+tr:last-child td:last-child{border-bottom-right-radius:var(--radius-sm);border-right:1px solid var(--border)}
+
+/* 分类胶囊群 Filter Chips */
+.chip-group{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:10px 0}
+.chip{
+  display:inline-flex;align-items:center;padding:4px 12px;border-radius:16px;
+  font-size:12px;font-weight:500;text-decoration:none;
+  background:var(--surface-sub);color:var(--text-sub);border:1px solid var(--border);
+  transition:all 0.15s ease;
+}
+.chip:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-light)}
+.chip.active,.chip.on{background:var(--primary);color:#fff;border-color:var(--primary);font-weight:600;box-shadow:0 1px 3px rgba(7,193,96,0.3)}
+
+/* 分页控件 Pagination */
+.pagination-wrap{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:14px 0 6px;padding-top:10px;border-top:1px dashed var(--border)}
+.pagination-btns{display:flex;align-items:center;gap:8px}
+
+.muted{color:var(--text-muted);font-size:12px}
+.err{color:var(--danger);font-weight:600}
+.ok{color:#059669;font-weight:600}
+
+/* 折叠区域 */
+details summary{cursor:pointer;font-weight:600;font-size:14px;color:var(--text-main);user-select:none;padding:4px 0}
+details summary:hover{color:var(--primary)}
+</style>
+</head>
+<body id="top">
+
+<!-- 顶部吸顶条 -->
+<header class="top-header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-icon">微</div>
+      <div>
+        <h1>微信智能助手 <span class="muted" style="font-weight:normal;font-size:13px">{{ self_name }} · {{ state }} · 已发送 {{ sent }} 条 · 运行 {{ uptime }} 分钟</span></h1>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <form method="post" style="display:flex;gap:8px;margin:0">
+        <button class="btn btn-sm {{ 'btn-danger' if not paused else 'btn-primary' }}" formaction="/pause" formmethod="post">
+          {{ '恢复自动回复' if paused else '暂停自动回复' }}
+        </button>
+        <button class="btn btn-sm" formaction="/reload" formmethod="post">从文件重载配置</button>
+      </form>
+    </div>
   </div>
-  <div class="row">
-    <label>答疑</label><input type="checkbox" name="qa_enabled" {{ 'checked' if (g.qa or {}).get('enabled') }}>
-    <label>带参考回复</label><input type="checkbox" name="grounded" {{ 'checked' if (g.qa or {}).get('grounded_reply', True) }}>
-    <label>知识库断线走人设</label><input type="checkbox" name="llm_fallback" {{ 'checked' if (g.qa or {}).get('llm_fallback') }}>
-    <label>自动挖历史</label><input type="checkbox" name="mine" {{ 'checked' if g.mine }}>
-    <span class="muted">@机器人提问触发；自动挖历史=定时把群聊增量抽成问答</span>
+</header>
+
+<!-- 快捷导航 -->
+<nav class="nav-tabs">
+  {% for n, h in nav %}<a href="{{ h }}">{{ n }}</a>{% endfor %}
+</nav>
+
+<div class="container">
+
+<!-- 状态统计仪表盘 Cards -->
+<div class="dashboard-grid">
+  <div class="metric-card">
+    <div class="metric-info">
+      <span class="metric-label">微信连接状态</span>
+      <span class="metric-value">{{ self_name or '未连接' }}</span>
+      <span class="metric-sub">{{ '正常连接' if driver_up else '请检查微信主窗口' }}</span>
+    </div>
+    <div class="metric-badge">💬</div>
   </div>
-  <div class="row">
-    <label>免@接话</label><input type="checkbox" name="no_at_reply" {{ 'checked' if g.no_at_reply }}>
-    <label>上下文条数</label><input type="number" name="no_at_context" value="{{ g.no_at_context or 20 }}" min="5" max="60" style="width:60px">
-    <label>冷却(分)</label><input type="number" name="no_at_cooldown_min" value="{{ g.no_at_cooldown_min or 3 }}" step="0.5" min="0" style="width:60px">
-    <span class="muted">没人@机器人也按最近聊天判断是否接话：先脱敏沉淀进知识库再作答；冷却内不重复接话，@提问不受限</span>
+  <div class="metric-card">
+    <div class="metric-info">
+      <span class="metric-label">助手运行状态</span>
+      <span class="metric-value {{ 'err' if paused else 'ok' }}">{{ state }}</span>
+      <span class="metric-sub">{{ '演示模式：只记日志不发送' if dry_run else '实盘模式：自动回复已就绪' }}</span>
+    </div>
+    <div class="metric-badge">{{ '⏸' if paused else '⚡' }}</div>
   </div>
-  <div class="row">
-    <label>进群欢迎</label><input type="checkbox" name="welcome" {{ 'checked' if (g.manage or {}).get('welcome') }}>
-    <input type="text" name="welcome_text" value="{{ (g.manage or {}).get('welcome_text') or '' }}" style="flex:1" placeholder="欢迎 {name} 入群！…（{name}=新人昵称）">
+  <div class="metric-card">
+    <div class="metric-info">
+      <span class="metric-label">累计自动回复</span>
+      <span class="metric-value">{{ sent }} <span style="font-size:12px;font-weight:normal;color:var(--text-muted)">条</span></span>
+      <span class="metric-sub">{{ '上限: ' ~ reply.max_replies ~ ' 条' if reply.max_replies else '无条数上限' }}</span>
+    </div>
+    <div class="metric-badge">📤</div>
   </div>
-  <div class="row">
-    <label>违禁词</label><input type="text" name="forbidden" value="{{ ((g.manage or {}).get('forbidden_words') or []) | join(', ') }}" style="flex:1" placeholder="逗号分隔：广告, 刷单">
-    <label>劝告人设</label><select name="warn_persona">{% for p in persona_names %}<option {{ 'selected' if (g.manage or {}).get('warn_persona')==p }}>{{ p }}</option>{% endfor %}</select>
-    <label>升级阈值</label><input type="number" name="warn_threshold" value="{{ (g.manage or {}).get('warn_threshold', 2) }}" min="1" max="9" style="width:60px">
-    <span class="muted">满 N 次私信管理员</span>
+  <div class="metric-card">
+    <div class="metric-info">
+      <span class="metric-label">系统运行时长</span>
+      <span class="metric-value">{{ uptime }} <span style="font-size:12px;font-weight:normal;color:var(--text-muted)">分钟</span></span>
+      <span class="metric-sub">全部保存操作即刻热生效</span>
+    </div>
+    <div class="metric-badge">⏱</div>
   </div>
-</form>
-{% endfor %}
-<form method="post" action="/cfg/group" class="row">
-  <input type="hidden" name="idx" value="-1">
-  <input type="hidden" name="do" value="save">
-  <label>新增群：</label><input type="text" name="display" placeholder="群名（必填）">
-  <input type="text" name="id" placeholder="群id（可空，自动匹配）" style="min-width:220px">
-  <button>添加群</button>
-</form>
-<p class="muted">只填群名即可：在微信里点开过该群，这里就能按名字自动匹配（群名带 emoji 也能匹配到）。</p>
 </div>
 
-<a name="llm"></a><div class="card"><h2>模型与节奏</h2>
-<form method="post" action="/cfg/llm" class="row">
-  <label>接口地址</label><input type="text" name="base_url" value="{{ llm.base_url or '' }}" style="min-width:260px">
-  <label>API Key</label><input type="password" name="api_key" value="{{ llm.api_key or '' }}" style="min-width:200px">
-  <label>模型</label><input type="text" name="model" value="{{ llm.model or '' }}">
-  <label>温度</label><input type="number" name="temperature" value="{{ llm.temperature or 0.8 }}" step="0.1" min="0" max="2" style="width:64px">
-  <label>超时(秒)</label><input type="number" name="timeout" value="{{ llm.timeout or 60 }}" style="width:64px">
-  <button>保存模型设置</button>
-</form>
-<form method="post" action="/cfg/app" class="row">
-  <input type="hidden" name="scope" value="run">
-  <label>演示模式</label><input type="checkbox" name="dry_run" {{ 'checked' if dry_run }}><span class="muted">只记日志不真正发送&nbsp;&nbsp;</span>
-  <label>轮询(秒)</label><input type="number" name="poll_sec" value="{{ reply.poll_sec or 3 }}" style="width:60px">
-  <label>合并连发(秒)</label><input type="number" name="quiesce_sec" value="{{ reply.quiesce_sec or 5 }}" style="width:60px">
-  <label>迟延(秒)</label><input type="number" name="hd_min" value="{{ (reply.human_delay or [2,5])[0] }}" style="width:55px"> ~
-  <input type="number" name="hd_max" value="{{ (reply.human_delay or [2,5])[1] }}" style="width:55px">
-  <label>发送上限</label><input type="number" name="max_replies" value="{{ reply.max_replies or 0 }}" style="width:70px">
-  <button>保存运行设置</button>
-</form>
-<form method="post" action="/cfg/app" class="row">
-  <input type="hidden" name="scope" value="admins">
-  <label>管理员 wxid</label><input type="text" name="admins" value="{{ admins | join(', ') }}" style="min-width:320px">
-  <button>保存管理员</button>
-  <span class="muted">逗号分隔；管理员私聊可发 #状态 #暂停 等命令</span>
-</form>
+{% if error %}
+<div class="alert alert-danger">
+  <b class="err">助手未运行：{{ error }}</b>
+  <form method="post" action="/retry" style="margin:0 0 0 auto"><button class="btn btn-sm btn-primary">重试启动</button></form>
+  <span class="muted">请确认微信 PC 版已登录且主窗口存在，然后点重试。</span>
+</div>
+{% endif %}
+
+{% if flash %}
+<div class="alert alert-success">
+  <span>✔</span> <span class="ok">{{ flash }}</span>
+</div>
+{% endif %}
+
+{% if form_error %}
+<div class="alert alert-danger" style="flex-direction:column;align-items:flex-start">
+  <div><span>⚠</span> <span class="err">{{ form_error }}</span></div>
+  {% if candidates %}
+  <div style="margin-top:8px;width:100%">
+    <p class="muted" style="margin-bottom:6px">最近会话里找到这些相似的，点一下直接加：</p>
+    {% for r in candidates %}
+    <form method="post" action="/cfg/pick" class="row" style="margin:4px 0">
+      <input type="hidden" name="id" value="{{ r.id }}">
+      <input type="hidden" name="display" value="{{ r.display }}">
+      <input type="hidden" name="kind" value="{{ 'group' if r.is_group else 'contact' }}">
+      <b style="min-width:140px">{{ r.display }}</b>
+      <span class="muted" style="min-width:240px">{{ r.id }}{{ ' ·群' if r.is_group }}</span>
+      <button class="btn btn-sm btn-primary">加为{{ '群' if r.is_group else '联系人' }}</button>
+    </form>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if not setup_done %}
+<div class="card" style="border-color:#fcd34d;background:#fffdf5">
+  <div class="card-header">
+    <div class="card-title" style="color:#b45309">🚀 首次使用向导</div>
+  </div>
+  <ol style="margin:4px 0 14px 18px;font-size:13px;color:var(--text-sub);line-height:1.7">
+    <li>确认微信 PC 版已登录（顶部状态显示：<b>{{ self_name }}</b>，不是"未连接"即可）</li>
+    <li>填模型接口（自动回复要靠它生成消息）：<b>地址 + API Key + 模型名</b> 三样都填好 → 保存</li>
+    <li>到下面的 <a href="#recent" style="color:var(--primary);font-weight:600">最近会话</a> 卡片，搜索后点"加为联系人/加为群"，把要接管的会话加进来</li>
+  </ol>
+  <form method="post" action="/setup/llm" class="row" style="margin-bottom:12px">
+    <label>模型接口地址</label><input type="text" name="base_url" value="{{ llm.base_url or '' }}" style="flex:1;min-width:280px" placeholder="https://your-llm-gateway.example/v1">
+    <label>API Key</label><input type="password" name="api_key" style="min-width:180px" placeholder="sk-…">
+    <label>模型名</label><input type="text" name="model" style="min-width:120px" placeholder="glm-4-flash">
+    <button class="btn btn-primary">保存模型设置</button>
+  </form>
+  <form method="post" action="/setup/llm" class="row" style="margin-bottom:12px">
+    <label>知识库地址（可选，群答疑用）</label><input type="text" name="kb_url" style="flex:1;min-width:260px" placeholder="https://your-kb-gateway.example/mcp">
+    <label>知识库 Key</label><input type="text" name="kb_key" style="min-width:170px" placeholder="key…">
+    <button class="btn">保存知识库设置</button>
+  </form>
+  <form method="post" action="/setup/done" class="row" style="padding-top:8px;border-top:1px dashed var(--border)">
+    <button class="btn btn-primary">✔ 完成向导，进入控制台</button>
+    <span class="muted">当前为演示模式（只记日志不真正发送）；都配好后去"模型与节奏"把演示模式关掉才真正回复</span>
+  </form>
+</div>
+{% endif %}
+
+<!-- 最近会话 -->
+<a name="recent"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">最近会话</div>
+    <span class="card-subtitle">点开过的聊天都在这，直接点加，不用查微信 ID</span>
+  </div>
+  {% if recent %}
+  <div class="row" style="margin-bottom:12px">
+    <input type="text" id="recentQ" placeholder="🔍 输入昵称/群名关键字实时过滤…" oninput="filterRecent(this.value)" style="min-width:280px">
+    <span class="muted" id="recentCount"></span>
+  </div>
+  <div class="table-responsive">
+    <table id="recentT">
+      <thead><tr><th style="width:28%">昵称 / 群名</th><th>微信 ID</th><th>类型</th><th style="text-align:right">操作</th></tr></thead>
+      <tbody id="recentB">
+      {% for r in recent %}{% set _s = ((r.display or '') ~ ' ' ~ (r.id or '')) | lower %}
+      <tr data-s="{{ _s }}">
+        <td><b>{{ r.display or '(空昵称)' }}</b></td>
+        <td class="muted" style="font-family:Consolas,monospace">{{ r.id }}</td>
+        <td><span class="badge {{ 'badge-success' if r.is_group else 'badge-neutral' }}">{{ '群' if r.is_group else '私聊' }}</span></td>
+        <td style="text-align:right">
+          {% if r.id in cfg_ids %}
+          <span class="badge badge-neutral">已配置</span>
+          {% else %}
+          <form method="post" action="/cfg/pick" style="margin:0;display:inline-block">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <input type="hidden" name="display" value="{{ r.display or r.id }}">
+            <input type="hidden" name="kind" value="{{ 'group' if r.is_group else 'contact' }}">
+            <button class="btn btn-sm btn-primary">加为{{ '群' if r.is_group else '联系人' }}</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted" style="margin-top:8px">列表来自微信"最近聊天"，没有的会话先在微信里点开一次就会出现在这里。API 形式：<code>/api/sessions?q=关键字</code></p>
+  <script>
+  function filterRecent(q){
+    q=(q||'').trim().toLowerCase();
+    var rows=document.getElementById('recentB').rows, n=0;
+    for(var i=0;i<rows.length;i++){
+      var hit=!q||rows[i].getAttribute('data-s').indexOf(q)>=0;
+      rows[i].style.display=hit?'':'none'; if(hit)n++;
+    }
+    document.getElementById('recentCount').textContent=n+' 个会话';
+  }
+  filterRecent('');
+  </script>
+  {% else %}
+  <p class="muted">{{ '微信未连接，连上后这里会列出最近会话' if not driver_up else '最近会话为空：先在微信里点开几个聊天' }}</p>
+  {% endif %}
 </div>
 
-<a name="kb"></a><div class="card"><h2>知识库（群答疑后端）</h2>
-<form method="post" action="/cfg/kb" class="row">
-  <label>地址</label><input type="text" name="url" value="{{ kb.url or '' }}" style="min-width:260px">
-  <label>API Key</label><input type="text" name="api_key" value="{{ kb.api_key or '' }}" style="min-width:240px">
-  <label>库</label><input type="text" name="kb" value="{{ kb.kb or '' }}" style="width:70px">
-  <label>top_k</label><input type="number" name="top_k" value="{{ kb.top_k or 5 }}" style="width:55px">
-  <label>超时</label><input type="number" name="timeout" value="{{ kb.timeout or 60 }}" style="width:60px">
-  <button>保存</button>
-</form>
-<p class="muted">当前 key 若过期会显示在日志区（HTTP 401）；群答疑在 kb 失败时可按群配置回退到人设 LLM。</p>
+<!-- 私聊联系人 -->
+<a name="contacts"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">私聊联系人</div>
+    <span class="card-subtitle">白名单机制：只有勾选"启用"的联系人才会由 AI 自动回复</span>
+  </div>
+  {% for c in contacts %}
+  <form method="post" action="/cfg/contact" class="row" style="border-bottom:1px dashed var(--border);padding:8px 0">
+    <input type="hidden" name="idx" value="{{ loop.index0 }}">
+    <label class="badge {{ 'on' if c.enabled else 'off' }}" style="min-width:68px;justify-content:center">{{ '● 启用' if c.enabled else '○ 停用' }}</label>
+    <input type="checkbox" name="enabled" {{ 'checked' if c.enabled }} title="勾选启用">
+    <input type="text" name="display" value="{{ c.display or '' }}" style="width:130px" placeholder="联系人昵称">
+    <input type="text" name="id" value="{{ c.id or '' }}" style="flex:1;min-width:200px;font-family:Consolas,monospace" placeholder="微信号/wxid">
+    <select name="persona">
+      {% for p in persona_names %}<option {{ 'selected' if c.persona==p }}>{{ p }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-sm btn-primary" name="action" value="save">保存</button>
+    <button class="btn btn-sm btn-danger" name="action" value="del" onclick="return confirm('删除联系人 {{ c.display }}？')">删除</button>
+  </form>
+  {% endfor %}
+  <form method="post" action="/cfg/contact" class="row" style="padding-top:12px">
+    <input type="hidden" name="action" value="new">
+    <label style="font-weight:600">新增联系人：</label>
+    <input type="text" name="display" placeholder="昵称（必填）" style="width:140px">
+    <input type="text" name="id" placeholder="微信号/wxid（可留空自动反查）" style="flex:1;min-width:220px">
+    <select name="persona">
+      {% for p in persona_names %}<option>{{ p }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-primary">添加联系人</button>
+  </form>
+  <p class="muted" style="margin-top:6px">不知道微信号就先只填昵称，保存后系统自动通过微信本地反查。</p>
 </div>
 
-<a name="logs"></a><div class="card"><h2>最近日志</h2>
-<table><tr><th>时间</th><th>类型</th><th>会话</th><th>内容</th></tr>
-{% for l in logs %}<tr><td class="muted">{{ l.t }}</td><td>{{ l.kind }}</td>
-<td>{{ l.chat }}</td><td>{{ l.detail }}</td></tr>{% endfor %}</table>
-{% if warns %}<p class="muted">劝告记录：{{ warns }}</p>{% endif %}
+<!-- 人设库 -->
+<a name="personas"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">人设库</div>
+    <span class="card-subtitle">定制对话语气与关系背景，供私聊与群聊绑定引用</span>
+  </div>
+  {% for name, p in personas.items() %}
+  <form method="post" action="/cfg/persona" class="row" style="border-bottom:1px dashed var(--border);padding:8px 0">
+    <input type="hidden" name="old_name" value="{{ name }}">
+    <b style="min-width:110px;font-size:13.5px">{{ name }}</b>
+    <input type="text" name="name" value="{{ name }}" style="width:120px" title="改名会同步更新各处的引用">
+    <input type="text" name="style" value="{{ p.style or '' }}" style="flex:1;min-width:260px" placeholder="说话风格（如：口语化、幽默爱接梗…）">
+    <input type="text" name="background" value="{{ p.background or '' }}" style="flex:1.4;min-width:260px" placeholder="背景与关系（如：多年老同学…）">
+    <button class="btn btn-sm btn-primary" name="do" value="save">保存</button>
+    <button class="btn btn-sm btn-danger" name="do" value="del" onclick="return confirm('删除人设 {{ name }}？引用它的联系人将退回默认风格')">删除</button>
+  </form>
+  {% endfor %}
+  <form method="post" action="/cfg/persona" class="row" style="padding-top:12px">
+    <input type="hidden" name="old_name" value="">
+    <label style="font-weight:600">新增人设：</label>
+    <input type="text" name="name" placeholder="人设名称（必填）" style="width:130px">
+    <input type="text" name="style" placeholder="说话风格" style="flex:1;min-width:220px">
+    <input type="text" name="background" placeholder="背景与关系" style="flex:1;min-width:220px">
+    <button class="btn btn-primary" name="do" value="save">添加人设</button>
+  </form>
 </div>
 
-<a name="pending"></a><div class="card"><h2>待沉淀问题（群答疑未正中，可复制给知识库管理员入库）</h2>
-<table><tr><th>#</th><th>群</th><th>提问人</th><th>问题</th></tr>
-{% for q in pending %}<tr><td>{{ q.id }}</td><td>{{ q.grp }}</td>
-<td>{{ q.questioner }}</td><td>{{ q.question }}</td></tr>{% endfor %}
-{% if not pending %}<tr><td colspan="4" class="muted">无</td></tr>{% endif %}
-</table></div>
-
-<a name="mine"></a><div class="card"><h2>群历史挖掘（把群聊记录抽成问答知识）</h2>
-{% if mine_status.running %}<p><b>正在挖掘 {{ mine_status.group }}：{{ mine_status.done }}/{{ mine_status.total }} 条消息，已抽 {{ mine_status.pairs }} 对…（页面每 5 秒自动刷新）</b></p>
-{% elif mine_status.error %}<p class="err">上次挖掘失败：{{ mine_status.error }}</p>
-{% else %}<p class="muted">空闲 · 本地已累计 {{ mined_count }} 对问答</p>{% endif %}
-{% for g in groups %}
-<form method="post" action="/mine" class="row">
-  <input type="hidden" name="idx" value="{{ loop.index0 }}">
-  <b style="min-width:140px">{{ g.display or g.id }}</b>
-  <button name="mode" value="full" onclick="return confirm('全量会重读整个群历史并调用模型，群很大时要跑几分钟，继续？')">全量挖掘</button>
-  <button name="mode" value="incr">增量挖掘</button>
-  <span class="muted">增量只处理上次之后的新消息；自动增量请在群配置勾"自动挖历史"</span>
-</form>
-{% endfor %}
-<form method="post" action="/mine/export" class="row">
-  <button>导出全部为 Markdown</button>
-  <span class="muted">导出文件交给知识库管理员导入即可入库</span>
-</form>
-<div class="row">
-  <span class="muted">按群：</span>
-  {% for l in m_group_links %}<a href="{{ l.href }}" class="{{ 'on' if l.active }}" style="margin-right:10px;font-size:13px">{{ l.name }}</a>{% endfor %}
-</div>
-<table><tr><th>群</th><th>问题</th><th>回答</th></tr>
-{% for r in mined %}<tr><td>{{ r.grp_name or r.grp }}</td><td>{{ r.question }}</td><td>{{ r.answer }}</td></tr>
-{% endfor %}
-{% if not mined %}<tr><td colspan="3" class="muted">还没有挖掘记录</td></tr>{% endif %}
-</table>
-<div class="row">
-  {% if m_prev %}<a href="{{ m_prev }}">← 上一页</a>{% endif %}
-  <span class="muted">第 {{ m_page_no }} / {{ m_pages_n }} 页（共 {{ m_total }} 条）</span>
-  {% if m_next %}<a href="{{ m_next }}">下一页 →</a>{% endif %}
-</div>
-</div>
-
-<a name="profiles"></a><div class="card"><h2>群友画像（群×成员 维度，答疑后自动更新，回答时注入帮助理解提问）</h2>
-{% if profile_status.running %}<p><b>正在刷新 {{ profile_status.group }}：{{ profile_status.done }}/{{ profile_status.total }} 个成员…（页面每 5 秒自动刷新）</b></p>
-{% elif profile_status.error %}<p class="err">上次刷新失败：{{ profile_status.error }}</p>{% endif %}
-{% for g in groups %}
-<form method="post" action="/profiles/refresh" class="row">
-  <input type="hidden" name="idx" value="{{ loop.index0 }}">
-  <b style="min-width:140px">{{ g.display or g.id }}</b>
-  <button>刷新该群画像</button>
-  <span class="muted">取群最近消息里最活跃的成员重建画像（每人至少间隔 1 小时才会真正重算）</span>
-</form>
-{% endfor %}
-<div class="row">
-  <span class="muted">按群：</span>
-  {% for l in p_group_links %}<a href="{{ l.href }}" class="{{ 'on' if l.active }}" style="margin-right:10px;font-size:13px">{{ l.name }}</a>{% endfor %}
-</div>
-<table><tr><th>群</th><th>昵称</th><th>画像</th><th>更新时间</th></tr>
-{% for p in member_profiles %}<tr><td>{{ p.grp_name }}</td><td>{{ p.nickname }}</td>
-<td>{{ p.profile }}</td><td class="muted">{{ p.updated_t }}</td></tr>
-{% endfor %}
-{% if not member_profiles %}<tr><td colspan="4" class="muted">还没有画像：群答疑后自动生成，或点上面"刷新该群画像"</td></tr>{% endif %}
-</table>
-<div class="row">
-  {% if p_prev %}<a href="{{ p_prev }}">← 上一页</a>{% endif %}
-  <span class="muted">第 {{ p_page_no }} / {{ p_pages_n }} 页（共 {{ p_total }} 条）</span>
-  {% if p_next %}<a href="{{ p_next }}">下一页 →</a>{% endif %}
-</div>
+<!-- 群设置 -->
+<a name="groups"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">群答疑与管理</div>
+    <span class="card-subtitle">支持智能问答、知识库挂载、免@接话、进群欢迎与违禁词秩序维护</span>
+  </div>
+  {% for g in groups %}
+  <form method="post" action="/cfg/group" style="background:var(--surface-sub);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px 16px;margin:10px 0">
+    <input type="hidden" name="idx" value="{{ loop.index0 }}">
+    <div class="row" style="margin-bottom:8px">
+      <label class="badge {{ 'on' if g.enabled else 'off' }}" style="min-width:64px;justify-content:center">{{ '● 启用' if g.enabled else '○ 停用' }}</label>
+      <input type="checkbox" name="enabled" {{ 'checked' if g.enabled }} title="启用该群">
+      <input type="text" name="display" value="{{ g.display or '' }}" placeholder="群名（用于搜索打开）" style="width:180px;font-weight:600">
+      <input type="text" name="id" value="{{ g.id or '' }}" placeholder="群 id（可空自动匹配）" style="flex:1;min-width:220px;font-family:Consolas,monospace">
+      <label>群内口吻：</label>
+      <select name="persona">{% for p in persona_names %}<option {{ 'selected' if g.persona==p }}>{{ p }}</option>{% endfor %}</select>
+      <button class="btn btn-sm btn-primary" formaction="/cfg/group" formmethod="post" name="do" value="save">保存设置</button>
+      <button class="btn btn-sm btn-danger" formaction="/cfg/group" formmethod="post" name="do" value="del" onclick="return confirm('删除群 {{ g.display }}？')">删除群</button>
+    </div>
+    <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
+      <label><input type="checkbox" name="qa_enabled" {{ 'checked' if (g.qa or {}).get('enabled') }}> 启用答疑</label>
+      <label><input type="checkbox" name="grounded" {{ 'checked' if (g.qa or {}).get('grounded_reply', True) }}> 带参考回复</label>
+      <label><input type="checkbox" name="llm_fallback" {{ 'checked' if (g.qa or {}).get('llm_fallback') }}> 知识库断线走人设</label>
+      <label><input type="checkbox" name="mine" {{ 'checked' if g.mine }}> 自动挖历史</label>
+      <span class="muted" style="margin-left:auto">@机器人提问触发；自动挖历史=定时把群聊增量抽成问答</span>
+    </div>
+    <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
+      <label><input type="checkbox" name="no_at_reply" {{ 'checked' if g.no_at_reply }}> 免@接话</label>
+      <label>参考上下文：<input type="number" name="no_at_context" value="{{ g.no_at_context or 20 }}" min="5" max="60" style="width:60px"> 条</label>
+      <label>回复冷却：<input type="number" name="no_at_cooldown_min" value="{{ g.no_at_cooldown_min or 3 }}" step="0.5" min="0" style="width:60px"> 分钟</label>
+      <span class="muted" style="margin-left:auto">没人@也智能判断是否值得帮忙回复，冷却内不频繁打扰</span>
+    </div>
+    <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
+      <label><input type="checkbox" name="welcome" {{ 'checked' if (g.manage or {}).get('welcome') }}> 进群欢迎语</label>
+      <input type="text" name="welcome_text" value="{{ (g.manage or {}).get('welcome_text') or '' }}" style="flex:1;min-width:260px" placeholder="欢迎 {name} 入群！…（{name} 为新人昵称）">
+    </div>
+    <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
+      <label>违禁词拦截：</label>
+      <input type="text" name="forbidden" value="{{ ((g.manage or {}).get('forbidden_words') or []) | join(', ') }}" style="flex:1;min-width:200px" placeholder="逗号分隔，如：广告, 刷单">
+      <label>劝告人设：</label>
+      <select name="warn_persona">{% for p in persona_names %}<option {{ 'selected' if (g.manage or {}).get('warn_persona')==p }}>{{ p }}</option>{% endfor %}</select>
+      <label>升级阈值：<input type="number" name="warn_threshold" value="{{ (g.manage or {}).get('warn_threshold', 2) }}" min="1" max="9" style="width:55px"> 次</label>
+      <span class="muted">满 N 次私信管理员</span>
+    </div>
+  </form>
+  {% endfor %}
+  <form method="post" action="/cfg/group" class="row" style="padding-top:10px">
+    <input type="hidden" name="idx" value="-1">
+    <input type="hidden" name="do" value="save">
+    <label style="font-weight:600">新增群：</label>
+    <input type="text" name="display" placeholder="群名（必填）" style="width:180px">
+    <input type="text" name="id" placeholder="群 id（可留空，自动通过微信匹配）" style="flex:1;min-width:220px">
+    <button class="btn btn-primary">添加群</button>
+  </form>
+  <p class="muted" style="margin-top:6px">只填群名即可：在微信里点开过该群，这里就能按名字自动匹配（群名带 emoji 也能匹配到）。</p>
 </div>
 
-<a name="yaml"></a><div class="card"><details><summary>高级：YAML 源码（给 AI / 调试用，网页保存会丢注释）</summary>
-<form method="post" action="/config">
-<textarea name="cfg">{{ cfg_text }}</textarea><br>
-<button>保存 YAML</button>
-</form></details></div>
+<!-- 模型与节奏 -->
+<a name="llm"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">模型接口与运行节奏</div>
+    <span class="card-subtitle">配置 OpenAI / 智谱 / 百炼等大模型网关与防封控拟人节奏</span>
+  </div>
+  <form method="post" action="/cfg/llm" class="row" style="margin-bottom:12px">
+    <label>接口地址</label><input type="text" name="base_url" value="{{ llm.base_url or '' }}" style="flex:1;min-width:260px" placeholder="https://api.openai.com/v1">
+    <label>API Key</label><input type="password" name="api_key" value="{{ llm.api_key or '' }}" style="min-width:180px" placeholder="sk-…">
+    <label>模型名称</label><input type="text" name="model" value="{{ llm.model or '' }}" style="width:140px" placeholder="glm-4-flash">
+    <label>温度</label><input type="number" name="temperature" value="{{ llm.temperature or 0.8 }}" step="0.1" min="0" max="2" style="width:60px">
+    <label>超时(秒)</label><input type="number" name="timeout" value="{{ llm.timeout or 60 }}" style="width:60px">
+    <button class="btn btn-primary">保存模型设置</button>
+  </form>
+  <form method="post" action="/cfg/app" class="row" style="padding:10px 0;border-top:1px dashed var(--border)">
+    <input type="hidden" name="scope" value="run">
+    <label class="badge {{ 'badge-warning' if dry_run else 'badge-success' }}"><input type="checkbox" name="dry_run" {{ 'checked' if dry_run }}> 演示模式（只记日志不发微信）</label>
+    <label>轮询周期：<input type="number" name="poll_sec" value="{{ reply.poll_sec or 3 }}" style="width:55px"> 秒</label>
+    <label>合并连发：<input type="number" name="quiesce_sec" value="{{ reply.quiesce_sec or 5 }}" style="width:55px"> 秒</label>
+    <label>拟人迟延：<input type="number" name="hd_min" value="{{ (reply.human_delay or [2,5])[0] }}" style="width:50px"> ~ <input type="number" name="hd_max" value="{{ (reply.human_delay or [2,5])[1] }}" style="width:50px"> 秒</label>
+    <label>发送上限：<input type="number" name="max_replies" value="{{ reply.max_replies or 0 }}" style="width:65px"> 条</label>
+    <button class="btn btn-primary">保存运行设置</button>
+  </form>
+  <form method="post" action="/cfg/app" class="row" style="padding-top:10px;border-top:1px dashed var(--border)">
+    <input type="hidden" name="scope" value="admins">
+    <label>管理员微信 ID：</label>
+    <input type="text" name="admins" value="{{ admins | join(', ') }}" style="flex:1;min-width:300px;font-family:Consolas,monospace" placeholder="多个微信号逗号分隔">
+    <button class="btn btn-primary">保存管理员</button>
+    <span class="muted">管理员私聊机器人可发 <code>#状态</code> <code>#暂停</code> <code>#恢复</code> 等控制命令</span>
+  </form>
+</div>
+
+<!-- 知识库 -->
+<a name="kb"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">知识库（RAG 答疑引擎）</div>
+    <span class="card-subtitle">通过 MCP 协议与专业知识库网关对接，群内提问精准检索</span>
+  </div>
+  <form method="post" action="/cfg/kb" class="row">
+    <label>MCP 地址</label><input type="text" name="url" value="{{ kb.url or '' }}" style="flex:1;min-width:240px" placeholder="https://your-kb.example/mcp">
+    <label>API Key</label><input type="text" name="api_key" value="{{ kb.api_key or '' }}" style="min-width:200px" placeholder="token…">
+    <label>库名称</label><input type="text" name="kb" value="{{ kb.kb or '' }}" style="width:90px" placeholder="team">
+    <label>top_k</label><input type="number" name="top_k" value="{{ kb.top_k or 5 }}" style="width:55px">
+    <label>超时(秒)</label><input type="number" name="timeout" value="{{ kb.timeout or 60 }}" style="width:60px">
+    <button class="btn btn-primary">保存知识库</button>
+  </form>
+  <p class="muted" style="margin-top:6px">当前 Key 若过期会在日志区提示（HTTP 401）；可在群设置中勾选"知识库断线走人设"保障兜底。</p>
+</div>
+
+<!-- 运行日志 -->
+<a name="logs"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">最近运行日志</div>
+    <span class="card-subtitle">记录近期消息处理、敏感词预警与发送详情</span>
+  </div>
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th style="width:14%">时间</th><th style="width:12%">类型</th><th style="width:20%">会话对象</th><th>详情内容</th></tr></thead>
+      <tbody>
+      {% for l in logs %}
+      <tr>
+        <td class="muted" style="font-family:Consolas,monospace">{{ l.t }}</td>
+        <td><span class="badge badge-neutral">{{ l.kind }}</span></td>
+        <td><b>{{ l.chat }}</b></td>
+        <td style="font-family:Consolas,monospace;font-size:12.5px">{{ l.detail }}</td>
+      </tr>
+      {% endfor %}
+      {% if not logs %}<tr><td colspan="4" class="muted" style="text-align:center">暂无日志</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% if warns %}<p class="muted" style="margin-top:8px">违规记录概览：{{ warns }}</p>{% endif %}
+</div>
+
+<!-- 待沉淀问题 -->
+<a name="pending"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">待沉淀问题清单</div>
+    <span class="card-subtitle">群内未命中知识库的问题汇总，可复制录入团队知识库</span>
+  </div>
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th style="width:60px">#</th><th style="width:22%">来源群</th><th style="width:18%">提问人</th><th>提问内容</th></tr></thead>
+      <tbody>
+      {% for q in pending %}
+      <tr>
+        <td class="muted">{{ q.id }}</td>
+        <td><b>{{ q.grp }}</b></td>
+        <td>{{ q.questioner }}</td>
+        <td>{{ q.question }}</td>
+      </tr>
+      {% endfor %}
+      {% if not pending %}<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无待沉淀问题</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 群历史挖掘 -->
+<a name="mine"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">群历史挖掘问答库</div>
+    <span class="card-subtitle">AI 自动解析群聊历史，提炼沉淀为高价值 Q&A 问答对</span>
+  </div>
+  {% if mine_status.running %}
+  <div class="alert alert-warning">
+    <b>正在挖掘 {{ mine_status.group }}：{{ mine_status.done }}/{{ mine_status.total }} 条消息，已抽取 {{ mine_status.pairs }} 对问答…（每 5 秒刷新）</b>
+  </div>
+  {% elif mine_status.error %}
+  <div class="alert alert-danger"><span class="err">上次挖掘失败：{{ mine_status.error }}</span></div>
+  {% else %}
+  <p class="muted" style="margin-bottom:10px">空闲状态 · 本地已累计收录 <b>{{ mined_count }}</b> 对问答</p>
+  {% endif %}
+
+  <div class="row" style="margin-bottom:12px">
+    {% for g in groups %}
+    <form method="post" action="/mine" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface-sub);padding:5px 10px;border-radius:var(--radius-sm);border:1px solid var(--border)">
+      <input type="hidden" name="idx" value="{{ loop.index0 }}">
+      <b>{{ g.display or g.id }}</b>
+      <button class="btn btn-sm" name="mode" value="incr">增量挖掘</button>
+      <button class="btn btn-sm btn-danger" name="mode" value="full" onclick="return confirm('全量会重读整个群历史并调用模型，群很大时要跑几分钟，继续？')">全量挖掘</button>
+    </form>
+    {% endfor %}
+    <form method="post" action="/mine/export" style="margin-left:auto">
+      <button class="btn btn-primary">导出全部为 Markdown</button>
+    </form>
+  </div>
+
+  <div class="chip-group">
+    <span class="muted" style="font-size:12px;margin-right:4px">按群：</span>
+    {% for l in m_group_links %}
+    <a href="{{ l.href }}" class="chip {{ 'active' if l.active }} {{ 'on' if l.active }}">{{ l.name }}</a>
+    {% endfor %}
+  </div>
+
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th style="width:20%">来源群</th><th style="width:35%">提炼问题</th><th>总结回答</th></tr></thead>
+      <tbody>
+      {% for r in mined %}
+      <tr>
+        <td><b>{{ r.grp_name or r.grp }}</b></td>
+        <td style="font-weight:600;color:var(--text-main)">{{ r.question }}</td>
+        <td style="color:var(--text-sub);line-height:1.6">{{ r.answer }}</td>
+      </tr>
+      {% endfor %}
+      {% if not mined %}<tr><td colspan="3" class="muted" style="text-align:center;padding:16px">还没有挖掘记录</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pagination-wrap">
+    <span class="muted">第 {{ m_page_no }} / {{ m_pages_n }} 页（共 {{ m_total }} 条）</span>
+    <div class="pagination-btns">
+      {% if m_prev %}<a href="{{ m_prev }}" class="btn btn-sm">← 上一页</a>{% endif %}
+      {% if m_next %}<a href="{{ m_next }}" class="btn btn-sm btn-primary">下一页 →</a>{% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- 群友画像 -->
+<a name="profiles"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">群友多维画像（群 × 成员）</div>
+    <span class="card-subtitle">结合群聊发言动态更新（1000字内），深度洞察意图，辅助人设融入作答</span>
+  </div>
+  {% if profile_status.running %}
+  <div class="alert alert-warning">
+    <b>正在刷新 {{ profile_status.group }}：{{ profile_status.done }}/{{ profile_status.total }} 个成员…（页面每 5 秒刷新）</b>
+  </div>
+  {% elif profile_status.error %}
+  <div class="alert alert-danger"><span class="err">上次刷新失败：{{ profile_status.error }}</span></div>
+  {% endif %}
+
+  <div class="row" style="margin-bottom:12px">
+    {% for g in groups %}
+    <form method="post" action="/profiles/refresh" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface-sub);padding:5px 10px;border-radius:var(--radius-sm);border:1px solid var(--border)">
+      <input type="hidden" name="idx" value="{{ loop.index0 }}">
+      <b>{{ g.display or g.id }}</b>
+      <button class="btn btn-sm btn-primary">刷新该群画像</button>
+    </form>
+    {% endfor %}
+    <span class="muted" style="margin-left:auto">取群活跃成员深度提炼（同一人至少间隔 1 小时重算防刷）</span>
+  </div>
+
+  <div class="chip-group">
+    <span class="muted" style="font-size:12px;margin-right:4px">按群：</span>
+    {% for l in p_group_links %}
+    <a href="{{ l.href }}" class="chip {{ 'active' if l.active }} {{ 'on' if l.active }}">{{ l.name }}</a>
+    {% endfor %}
+  </div>
+
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th style="width:18%">群名</th><th style="width:18%">成员昵称</th><th>用户画像与意图特征（1000字以内）</th><th style="width:120px;text-align:right">更新时间</th></tr></thead>
+      <tbody>
+      {% for p in member_profiles %}
+      <tr>
+        <td><b>{{ p.grp_name }}</b></td>
+        <td><span class="badge badge-neutral" style="font-weight:600">{{ p.nickname }}</span></td>
+        <td style="line-height:1.6;color:var(--text-sub)">{{ p.profile }}</td>
+        <td class="muted" style="text-align:right;font-family:Consolas,monospace">{{ p.updated_t }}</td>
+      </tr>
+      {% endfor %}
+      {% if not member_profiles %}<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">还没有画像：群答疑后自动生成，或点上面"刷新该群画像"</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pagination-wrap">
+    <span class="muted">第 {{ p_page_no }} / {{ p_pages_n }} 页（共 {{ p_total }} 条）</span>
+    <div class="pagination-btns">
+      {% if p_prev %}<a href="{{ p_prev }}" class="btn btn-sm">← 上一页</a>{% endif %}
+      {% if p_next %}<a href="{{ p_next }}" class="btn btn-sm btn-primary">下一页 →</a>{% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- YAML 配置 -->
+<a name="yaml"></a>
+<div class="card">
+  <details>
+    <summary>⚙ 高级：YAML 配置文件源码（供 AI 诊断与开发者深度调试，网页保存会去除注释）</summary>
+    <form method="post" action="/config" style="margin-top:12px">
+      <textarea name="cfg" spellcheck="false">{{ cfg_text }}</textarea>
+      <div style="margin-top:8px">
+        <button class="btn btn-primary">保存并应用 YAML</button>
+      </div>
+    </form>
+  </details>
+</div>
+
+</div>
 </body></html>"""
 
 
