@@ -90,14 +90,19 @@ def run_gui(cfg_path=None):
     url = f"http://127.0.0.1:{shell.cfg.web_port}"
     try:
         import webview
+        webview.create_window("微信智能助手", url,
+                              width=1100, height=800, min_size=(860, 600))
+        webview.start()
+        log.info("窗口关闭，退出")
     except ImportError:
-        # pywebview 未安装/未随包（CI 最小依赖打包）→ 退回默认浏览器，功能一致
+        # pywebview 未安装/未随包 → 退回默认浏览器，功能一致
         import webbrowser
         log.info("pywebview 不可用，用默认浏览器打开 %s", url)
         webbrowser.open(url)
         _keepalive()
-        return
-    webview.create_window("微信智能助手", url,
-                          width=1100, height=800, min_size=(860, 600))
-    webview.start()
-    log.info("窗口关闭，退出")
+    except Exception as e:
+        # pywebview 在但起不来（如 WebView2 运行时缺失）→ 同样退回浏览器兜底
+        import webbrowser
+        log.warning("pywebview 窗口启动失败(%s)，退回默认浏览器", e)
+        webbrowser.open(url)
+        _keepalive()
