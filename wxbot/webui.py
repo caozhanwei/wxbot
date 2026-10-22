@@ -478,7 +478,7 @@ details summary:hover{color:var(--primary)}
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
       <label><input type="checkbox" name="no_at_reply" {{ 'checked' if g.no_at_reply }}> 免@接话</label>
       <label>参考上下文：<input type="number" name="no_at_context" value="{{ g.no_at_context or 20 }}" min="5" max="60" style="width:60px"> 条</label>
-      <label>回复冷却：<input type="number" name="no_at_cooldown_min" value="{{ g.no_at_cooldown_min or 3 }}" step="0.5" min="0" style="width:60px"> 分钟</label>
+      <label>回复冷却：<input type="number" name="no_at_cooldown_min" value="{{ g.no_at_cooldown_min or 3 }}" step="0.1" min="0.1" style="width:60px"> 分钟</label>
       <span class="muted" style="margin-left:auto">没人@也智能判断是否值得帮忙回复，冷却内不频繁打扰</span>
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">

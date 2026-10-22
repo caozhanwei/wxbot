@@ -79,7 +79,7 @@ groups:
   mine: false                  # 自动增量挖掘群历史 → 网页"挖掘"区查看/导出
   no_at_reply: false           # 免@接话：没人@机器人时也按最近聊天判断是否主动回复（默认关）
   no_at_context: 20            # 免@判断参考的最近消息条数（含触发消息，默认 20）
-  no_at_cooldown_min: 3        # 免@回复冷却分钟数（期间不重复接话；@提问不受限，默认 3）
+  no_at_cooldown_min: 3        # 免@回复冷却分钟数（期间不重复接话；@提问不受限，默认 3，支持 0.1 分钟步进）
   qa:
     enabled: true
     grounded_reply: true
