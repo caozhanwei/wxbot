@@ -38,24 +38,51 @@ def _fill(store):
     store.upsert_profile("111@chatroom", "wxid_a", "阿明", "阿明的画像")
     store.upsert_contact_memory("wxid_1", "张三的记忆")
     store.add_mined("111@chatroom", [("问题1", "答案1")])
+    store.add_qa_pending("测试群", "李四", "待沉淀问题", "带参考的答案")
+    store.add_pending_issue("111@chatroom", "王五", "遗留问题", "上下文")
 
 
 def test_export_roundtrip(tmp_path):
     a = Store(str(tmp_path / "a.db"))
     _fill(a)
     data = a.export_knowledge(source_wxid="wxid_src")
-    assert data["wxbot_export"] == 1
+    assert data["wxbot_export"] == 2
     assert data["source_wxid"] == "wxid_src"
     assert data["member_profiles"][0]["nickname"] == "阿明"
     assert data["contact_memories"][0]["memory"] == "张三的记忆"
     assert data["mined_qa"][0]["question"] == "问题1"
+    assert data["qa_pending"][0]["question"] == "待沉淀问题"
+    assert data["pending_issues"][0]["question"] == "遗留问题"
+    assert "config_yaml" not in data
 
     b = Store(str(tmp_path / "b.db"))
     counts = b.import_knowledge(data)
-    assert counts == {"profiles": 1, "memories": 1, "mined_qa": 1}
+    assert counts == {"profiles": 1, "memories": 1, "mined_qa": 1,
+                      "qa_pending": 1, "pending_issues": 1}
     assert b.get_profile("111@chatroom", "wxid_a")["profile"] == "阿明的画像"
     assert b.get_contact_memory("wxid_1") == "张三的记忆"
     assert b.mined_count() == 1
+    assert b.qa_pending()[0]["question"] == "待沉淀问题"
+    assert b.pending_issues()[0]["asker"] == "王五"
+
+
+def test_export_with_config_yaml(tmp_path):
+    a = Store(str(tmp_path / "a.db"))
+    data = a.export_knowledge(config_yaml="app: {dry_run: true}\n")
+    assert data["config_yaml"] == "app: {dry_run: true}\n"
+
+
+def test_import_pending_sections_dedupe(tmp_path):
+    src = Store(str(tmp_path / "s.db"))
+    src.add_qa_pending("群", "李四", "问题A")
+    src.add_pending_issue("群", "王五", "诉求B")
+    dst = Store(str(tmp_path / "d.db"))
+    data = src.export_knowledge()
+    dst.import_knowledge(data)
+    dst.import_knowledge(data)
+    assert dst.import_knowledge(data)["qa_pending"] == 0
+    assert len(dst.qa_pending(limit=100)) == 1
+    assert len(dst.pending_issues(limit=100)) == 1
 
 
 def test_import_conflict_skip_and_overwrite(tmp_path):
@@ -86,7 +113,8 @@ def test_import_mined_dedupe(tmp_path):
 def test_import_rejects_bad_payload(tmp_path):
     s = Store(str(tmp_path / "x.db"))
     assert s.import_knowledge({"member_profiles": "不是列表"}) == {
-        "profiles": 0, "memories": 0, "mined_qa": 0}
+        "profiles": 0, "memories": 0, "mined_qa": 0,
+        "qa_pending": 0, "pending_issues": 0}
     assert s.import_knowledge({"member_profiles": [
         {"nickname": "缺 wxid"}]})["profiles"] == 0
 

@@ -7,6 +7,7 @@
 3. 历史未解决诉求与待办问题发现 (pending_issues)
 """
 import logging
+import re
 import threading
 import time
 from collections import defaultdict
@@ -14,6 +15,9 @@ from collections import defaultdict
 from . import group_logic
 
 log = logging.getLogger("wxbot.bootstrap")
+
+# 与 mining._SENSITIVE 同款：命中即整条跳过，不送 LLM
+_SENSITIVE = re.compile(r"\d{15,}|卡号|开户|身份证|密码|验证码")
 
 _status_lock = threading.Lock()
 _STATUS = {
@@ -95,6 +99,77 @@ def run_bootstrap_sync(bot, gid: str, gname: str, limit: int = 1000) -> bool:
         return False
 
 
+def run_contact_memory_sync(bot, display: str, limit: int = 2000) -> dict:
+    """私聊历史冷启动：读迁移/历史消息，滑窗迭代提炼联系人长期记忆。
+
+    每 10 行一窗滚动合并（extract_contact_memory 内部取窗口末 10 行），
+    已有记忆为起点，跑完整体覆盖回 contact_memories。
+    """
+    uid = ""
+    if display.startswith("wxid_") or "@" in display:
+        uid = display
+    else:
+        uid = bot.driver.resolve_id(display) or ""
+    if not uid:
+        return {"error": f"找不到联系人：{display}"}
+
+    msgs = bot.driver.db.get_messages(uid, limit=limit) or []
+    ordered = list(reversed(msgs))  # 按时间正序回放
+
+    lines = []
+    for m in ordered:
+        body = str(m.get("content") or "").strip()
+        if not body or body.startswith("<?xml") or _SENSITIVE.search(body):
+            continue
+        who = m.get("sender_username") or ""
+        if who == getattr(bot.driver, "self_id", ""):
+            name = "我"
+        elif who:
+            name = bot.driver.display_of(who) if hasattr(bot.driver, "display_of") else who
+        else:
+            name = display
+        lines.append(f"{name}: {body[:100]}")
+
+    mem = bot.store.get_contact_memory(uid)
+    for i in range(0, len(lines), 10):
+        mem = bot.personas.extract_contact_memory(display, lines[i:i + 10], mem)
+        time.sleep(0.2)
+    if mem:
+        bot.store.upsert_contact_memory(uid, mem)
+    log.info("私聊记忆冷启动完成 [%s]: %d 条消息 %d 行 → %s",
+             display, len(ordered), len(lines), (mem or "")[:60])
+    return {"wxid": uid, "msgs": len(ordered), "lines": len(lines), "memory": mem or ""}
+
+
+_contact_lock = threading.Lock()
+_CONTACT_STATUS = {"running": False, "who": "", "result": None}
+
+
+def contact_mining_status() -> dict:
+    with _contact_lock:
+        return dict(_CONTACT_STATUS)
+
+
+def start_contact_mining_async(bot, display: str, limit: int = 2000) -> bool:
+    with _contact_lock:
+        if _CONTACT_STATUS["running"]:
+            return False
+        _CONTACT_STATUS.update(running=True, who=display, result=None)
+
+    def _run():
+        try:
+            r = run_contact_memory_sync(bot, display, limit=limit)
+        except Exception as e:
+            log.exception("私聊记忆冷启动异常: %s", e)
+            r = {"error": str(e)}
+        with _contact_lock:
+            _CONTACT_STATUS.update(running=False, result=r)
+
+    threading.Thread(target=_run, daemon=True,
+                     name=f"ContactMine-{display[:8]}").start()
+    return True
+
+
 def _pipeline_profiles(bot, gid: str, msgs: list):
     """流水线1：提取活跃群友发言并生成画像。"""
     member_msgs = defaultdict(list)
@@ -105,7 +180,7 @@ def _pipeline_profiles(bot, gid: str, msgs: list):
             sender, parsed = group_logic.parse_group_content(body)
             who = who or sender
             body = parsed
-        if not who or who == getattr(bot.driver, "self_id", ""):
+        if not who:
             continue
         body = body.strip()
         if body and not body.startswith("<?xml") and len(body) >= 2:

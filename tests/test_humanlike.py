@@ -64,3 +64,33 @@ def test_casual_group_reply():
     reply = p.casual_group_reply("老友幽默", "老司机养成记", ["张三: 出来冒泡"], "张三", "出彩了吗")
     assert "哈哈我在呢，有问题随时@我" not in reply
     assert len(reply) > 0
+
+
+def test_group_reply_injects_both_profiles():
+    """群回复注入双方画像：本人画像保持口吻一致，提问者画像洞察意图。"""
+    seen = {}
+
+    class FakeLLM:
+        def chat(self, system, user, temperature=0.8):
+            seen["user"] = user
+            return "好嘞，这块我熟，等我翻下记录 [呲牙]"
+
+    class FakeConfig:
+        llm_cfg = {"temperature": 0.8}
+        def persona(self, name):
+            return {"style": "幽默风趣", "background": "老朋友"}
+
+    p = personas.PersonaEngine(FakeConfig())
+    p.llm = FakeLLM()
+    p.group_answer("老友幽默", "老司机群", ["张三: 这个报错咋整"], "这报错咋回事",
+                   "张三", profile="张三是新手司机，爱问实操问题",
+                   self_profile="本人十年老司机，爱用行车经验打比方")
+    assert "本人（号主）在群里的画像" in seen["user"]
+    assert "十年老司机" in seen["user"]
+    assert "提问者画像" in seen["user"]
+    assert "新手司机" in seen["user"]
+
+    seen.clear()
+    p.casual_group_reply("老友幽默", "老司机群", ["张三: 出来冒泡"], "张三", "在吗",
+                         profile="爱开玩笑", self_profile="本人自嘲型幽默")
+    assert "自嘲型幽默" in seen["user"]

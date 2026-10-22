@@ -208,9 +208,10 @@ class Store:
                 "SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
 
-    # ---------- 知识资产导入导出（跨账号迁移） ----------
-    def export_knowledge(self, source_wxid=""):
-        """导出群友画像 + 私聊长期记忆 + 挖掘问答为可迁移 dict。"""
+    # ---------- 知识资产导入导出（跨账号迁移 / 全量备份） ----------
+    def export_knowledge(self, source_wxid="", config_yaml=""):
+        """导出群友画像+私聊记忆+问答沉淀+待沉淀问题+未解诉求；
+        config_yaml 非空时附配置原文（全量备份用，含密钥）。"""
         with self._conn() as c:
             prof = [dict(r) for r in c.execute(
                 "SELECT grp,wxid,nickname,profile FROM member_profiles "
@@ -219,15 +220,25 @@ class Store:
                 "SELECT wxid,memory FROM contact_memories ORDER BY wxid")]
             qa = [dict(r) for r in c.execute(
                 "SELECT grp,question,answer FROM mined ORDER BY id")]
-        return {"wxbot_export": 1, "exported_at": time.time(),
+            qap = [dict(r) for r in c.execute(
+                "SELECT grp,questioner,question,answer,status FROM qa_pending "
+                "ORDER BY id")]
+            iss = [dict(r) for r in c.execute(
+                "SELECT grp,asker,question,context,status FROM pending_issues "
+                "ORDER BY id")]
+        data = {"wxbot_export": 2, "exported_at": time.time(),
                 "source_wxid": source_wxid,
                 "member_profiles": prof, "contact_memories": mem,
-                "mined_qa": qa}
+                "mined_qa": qa, "qa_pending": qap, "pending_issues": iss}
+        if config_yaml:
+            data["config_yaml"] = config_yaml
+        return data
 
     def import_knowledge(self, data, overwrite=False):
         """导入 export_knowledge 产物；同键已有数据时 overwrite=True 才覆盖。
-        返回各资产实际写入条数。"""
-        n = {"profiles": 0, "memories": 0, "mined_qa": 0}
+        返回各资产实际写入条数（v1 老包缺的段计 0）。"""
+        n = {"profiles": 0, "memories": 0, "mined_qa": 0,
+             "qa_pending": 0, "pending_issues": 0}
         if not isinstance(data, dict):
             return n
         with self._lock, self._conn() as c:
@@ -269,4 +280,36 @@ class Store:
                           (time.time(), q.get("grp") or "",
                            str(q["question"])[:200], str(q.get("answer") or "")[:400]))
                 n["mined_qa"] += 1
+            for q in data.get("qa_pending") or []:
+                if not isinstance(q, dict) or not q.get("question"):
+                    continue
+                if c.execute(
+                        "SELECT 1 FROM qa_pending WHERE grp=? AND questioner=? "
+                        "AND question=?",
+                        (q.get("grp") or "", q.get("questioner") or "",
+                         str(q["question"])[:500])).fetchone():
+                    continue
+                c.execute(
+                    "INSERT INTO qa_pending(ts,grp,questioner,question,answer,status) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (time.time(), q.get("grp") or "", q.get("questioner") or "",
+                     str(q["question"])[:500], str(q.get("answer") or "")[:500],
+                     q.get("status") or "pending"))
+                n["qa_pending"] += 1
+            for it in data.get("pending_issues") or []:
+                if not isinstance(it, dict) or not it.get("question"):
+                    continue
+                if c.execute(
+                        "SELECT 1 FROM pending_issues WHERE grp=? AND asker=? "
+                        "AND question=?",
+                        (it.get("grp") or "", it.get("asker") or "",
+                         str(it["question"])[:500])).fetchone():
+                    continue
+                c.execute(
+                    "INSERT INTO pending_issues(ts,grp,asker,question,context,status) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (time.time(), it.get("grp") or "", it.get("asker") or "",
+                     str(it["question"])[:500], str(it.get("context") or "")[:500],
+                     it.get("status") or "pending"))
+                n["pending_issues"] += 1
         return n

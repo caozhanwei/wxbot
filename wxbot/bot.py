@@ -175,6 +175,8 @@ class Bot:
     # ---------- 主循环 ----------
     def run(self):
         self.build_watch()
+        from . import profiles as _profiles
+        _profiles.start_auto_refresh(self)
         if self.with_web:
             from . import webui
             webui.start_web(self)
@@ -363,6 +365,11 @@ class Bot:
             profile = (self.store.get_profile(w["user"], m["sender"]) or {}).get("profile") or ""
         except Exception:
             profile = ""
+        try:
+            self_profile = (self.store.get_profile(
+                w["user"], getattr(self.driver, "self_id", "")) or {}).get("profile") or ""
+        except Exception:
+            self_profile = ""
         standalone, should = question, True
         try:
             ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
@@ -376,7 +383,8 @@ class Bot:
         if not should:
             # 闲聊/玩笑/打趣@机器人：接地气幽默接话，坚决拒绝死板客服模板
             casual = self.personas.casual_group_reply(
-                g.get("persona", "通用朋友"), w["display"], ctx, asker, question, profile=profile)
+                g.get("persona", "通用朋友"), w["display"], ctx, asker, question,
+                profile=profile, self_profile=self_profile)
             self.send_quote(w["display"], casual, target_name=asker, target_content=raw_msg_content)
             return
         try:
@@ -392,7 +400,8 @@ class Bot:
                         ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
                     reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                        w["display"], ctx, standalone,
-                                                       asker, profile=profile)
+                                                       asker, profile=profile,
+                                                       self_profile=self_profile)
                     self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
                 except Exception as ee:
                     log.warning("LLM 兜底也失败: %s", ee)
@@ -404,13 +413,15 @@ class Bot:
             # 消除原始技术文档直接外露：通过人设引擎将参考资料润色为自然对话
             reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                w["display"], ctx, standalone,
-                                               asker, profile=profile, kb_ref=answer)
+                                               asker, profile=profile, kb_ref=answer,
+                                               self_profile=self_profile)
             self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
         else:
             self.store.add_qa_pending(w["display"], asker, standalone)
             reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                w["display"], ctx, standalone,
-                                               asker, profile=profile)
+                                               asker, profile=profile,
+                                               self_profile=self_profile)
             if not reply:
                 reply = "这个我手头暂时没查到准确资料，已帮你记下反馈给群里小伙伴啦～"
             self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)

@@ -56,7 +56,7 @@ def update_profile(personas, store, driver, grp, wxid, nickname, lines=None):
 
 
 def active_members(driver, grp, top=BATCH_TOP):
-    """群最近消息里最活跃的成员 wxid 列表（排除自己与系统）。"""
+    """群最近消息里最活跃的成员 wxid 列表（含本人，本人画像用于回复融合）。"""
     msgs = driver.db.get_messages(grp, limit=200)
     seen = {}
     for m in msgs:
@@ -64,7 +64,7 @@ def active_members(driver, grp, top=BATCH_TOP):
         body = str(m.get("content") or "")
         if grp.endswith("@chatroom") and not who:
             who = group_logic.parse_group_content(body)[0]
-        if who and who != driver.self_id and who not in seen:
+        if who and who not in seen:
             seen[who] = True
         if len(seen) >= top:
             break
@@ -108,4 +108,37 @@ def start_refresh(bot, gid, gname):
             _STATUS["running"] = False
 
     threading.Thread(target=_job, daemon=True).start()
+    return True
+
+
+def auto_profile_hours(cfg) -> float:
+    """配置 app.auto_profile_hours：>0 开启定时增量画像，0/缺省关闭。"""
+    try:
+        v = float((cfg.data.get("app") or {}).get("auto_profile_hours") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, v)
+
+
+def start_auto_refresh(bot, first_delay=300.0):
+    """定时增量画像：启动 first_delay 秒后先刷一遍，之后每 N 小时一遍。"""
+    hours = auto_profile_hours(bot.cfg)
+    if hours <= 0:
+        return False
+
+    def _loop():
+        time.sleep(first_delay)
+        while True:
+            for g in bot.cfg.groups:
+                if not g.get("enabled"):
+                    continue
+                try:
+                    refresh_group(bot, g.get("id") or "")
+                    log.info("定时画像增量完成 %s", g.get("display") or g.get("id"))
+                except Exception as e:
+                    log.warning("定时画像增量失败(%s): %s", g.get("display"), e)
+            time.sleep(hours * 3600.0)
+
+    threading.Thread(target=_loop, daemon=True, name="AutoProfiles").start()
+    log.info("定时画像增量已开启：每 %.1f 小时", hours)
     return True

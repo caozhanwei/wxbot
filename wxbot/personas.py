@@ -183,8 +183,8 @@ class PersonaEngine:
         return {"standalone": standalone, "should_answer": bool(d.get("should_answer", True))}
 
     def group_answer(self, persona_name, group, context_lines, question,
-                     asker, profile="", kb_ref=""):
-        """@提问的群内回答：结合上下文与提问者画像，像真人接话一样答，可引用群友观点。"""
+                     asker, profile="", kb_ref="", self_profile=""):
+        """@提问的群内回答：结合上下文与双方画像，像真人接话一样答，可引用群友观点。"""
         p = self.cfg.persona(persona_name)
         system = (f'你是微信群"{group}"里的助手（有人@你提问）。'
                   f"回答风格：{p.get('style')}。背景：{p.get('background') or '帮群友答疑'}。"
@@ -194,6 +194,8 @@ class PersonaEngine:
                   "只输出一条可直接发送的微信群文本：不要@提问者以外的其他人、"
                   "不要解释、不要引号、不要markdown，不超过 200 字。")
         user = "群里最近的对话：\n" + "\n".join(context_lines)
+        if self_profile:
+            user += f"\n\n你本人（号主）在群里的画像，回答口吻与立场保持一致：{self_profile}"
         if profile:
             user += f"\n\n提问者画像：{profile}"
         user += f"\n\n{asker} 的问题：{question}"
@@ -205,7 +207,7 @@ class PersonaEngine:
         raw = self.llm.chat(system, user, temperature=temp)
         return _sanitize(raw)
 
-    def casual_group_reply(self, persona_name, group, context_lines, asker, question, profile=""):
+    def casual_group_reply(self, persona_name, group, context_lines, asker, question, profile="", self_profile=""):
         """群聊闲聊、调侃、玩笑或纯@时的拟人回复：拒绝死板机器人话术，幽默机智接地气。"""
         p = self.cfg.persona(persona_name)
         system = (
@@ -220,6 +222,8 @@ class PersonaEngine:
         user = f"群：{group}\n对方：{asker}"
         if profile:
             user += f"（群友特点：{profile}）"
+        if self_profile:
+            user += f"\n你本人的画像（保持一致的说话习惯）：{self_profile}"
         user += ("\n最近群聊对话：\n" + "\n".join(context_lines[-8:])
                  + f"\n\n对方说：{question}\n你的接话：")
         try:

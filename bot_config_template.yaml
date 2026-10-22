@@ -7,6 +7,7 @@ app:
   setup_done: false              # 首启向导完成标志，点"完成"后自动置 true
   web_port: 8778
   db_file: wxbot.db
+  auto_profile_hours: 0          # 定时增量画像：>0 时每 N 小时自动刷新启用群的活跃成员画像（0=关）
 llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
   base_url: https://your-llm-gateway.example/v1

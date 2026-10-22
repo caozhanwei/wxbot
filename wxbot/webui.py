@@ -102,6 +102,12 @@ nav.nav-tabs a:hover{color:var(--primary);border-color:var(--primary);background
 }
 .card:hover{box-shadow:var(--shadow-md)}
 .card-header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:14px}
+/* 卡片折叠：点标题收起/展开，状态记 localStorage */
+.card-header{cursor:pointer;user-select:none}
+.card-header::after{content:"▾";color:var(--text-muted);font-size:13px;margin-left:8px;transition:transform .15s}
+.card.collapsed>.card-header{margin-bottom:0;border-bottom-color:transparent}
+.card.collapsed>.card-header::after{transform:rotate(-90deg)}
+.card.collapsed>*:not(.card-header){display:none}
 .card-title{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--text-main)}
 .card-title::before{content:"";display:inline-block;width:3px;height:14px;background:var(--primary);border-radius:2px}
 .card-subtitle{font-size:12px;color:var(--text-muted);font-weight:normal}
@@ -392,6 +398,7 @@ details summary:hover{color:var(--primary)}
       {% for p in persona_names %}<option {{ 'selected' if c.persona==p }}>{{ p }}</option>{% endfor %}
     </select>
     <button class="btn btn-sm btn-primary" name="action" value="save">保存</button>
+    <button class="btn btn-sm" formaction="/contacts/mine" formmethod="post" title="读私聊历史消息，滑窗提炼该好友的长期记忆（家庭/喜好/约定），回话自动融入">🧠 提炼记忆</button>
     <button class="btn btn-sm btn-danger" name="action" value="del" onclick="return confirm('删除联系人 {{ c.display }}？')">删除</button>
   </form>
   {% endfor %}
@@ -708,12 +715,16 @@ details summary:hover{color:var(--primary)}
   </div>
 
   <div class="row" style="margin-bottom:12px;gap:8px;align-items:center;background:var(--surface-sub);padding:8px 12px;border-radius:var(--radius-sm);border:1px solid var(--border)">
-    <b style="white-space:nowrap">跨账号迁移</b>
-    <span class="muted" style="font-size:12px">换微信号登录后，把旧账号的画像/私聊记忆/问答沉淀搬过来</span>
-    <a href="/knowledge/export" class="btn btn-sm btn-primary" style="margin-left:auto;text-decoration:none">⬇ 导出全部（JSON）</a>
+    <b style="white-space:nowrap">备份与迁移</b>
+    <span class="muted" style="font-size:12px">换号迁移画像/记忆/问答，或整机备份（含配置）</span>
+    <form method="get" action="/knowledge/export" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">
+      <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px" title="勾选后导出包包含 bot_config.yaml 原文（含 API 密钥，注意保管）"><input type="checkbox" name="cfg" value="1">含配置</label>
+      <button class="btn btn-sm btn-primary">⬇ 导出全部（JSON）</button>
+    </form>
     <form method="post" action="/knowledge/import" enctype="multipart/form-data" style="display:inline-flex;align-items:center;gap:6px">
-      <input type="file" name="file" accept=".json" required style="font-size:12px;max-width:220px">
+      <input type="file" name="file" accept=".json" required style="font-size:12px;max-width:200px">
       <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px"><input type="checkbox" name="overwrite" value="1">覆盖已有</label>
+      <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px" title="文件里带配置时才会恢复"><input type="checkbox" name="restore_cfg" value="1">恢复配置</label>
       <button class="btn btn-sm">⬆ 导入</button>
     </form>
   </div>
@@ -766,6 +777,25 @@ details summary:hover{color:var(--primary)}
 </div>
 
 </div>
+<script>
+(function(){
+  var KEY='wxbot-collapsed';
+  var st={};
+  try{st=JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){}
+  var cards=document.querySelectorAll('.card');
+  cards.forEach(function(c,i){
+    var h=c.querySelector('.card-header');
+    if(!h)return;
+    if(st[i])c.classList.add('collapsed');
+    h.addEventListener('click',function(e){
+      if(e.target.closest('button,input,a,select,textarea,label,form'))return;
+      c.classList.toggle('collapsed');
+      st[i]=c.classList.contains('collapsed');
+      try{localStorage.setItem(KEY,JSON.stringify(st))}catch(err){}
+    });
+  });
+})();
+</script>
 </body></html>"""
 
 
@@ -1280,8 +1310,16 @@ def start_web(bot):
 
     @app.route("/knowledge/export")
     def knowledge_export():
+        cfg_yaml = ""
+        if request.args.get("cfg"):
+            try:
+                with open(bot.cfg.path, encoding="utf-8") as fh:
+                    cfg_yaml = fh.read()
+            except OSError as e:
+                log.warning("读取配置用于备份失败: %s", e)
         data = bot.store.export_knowledge(
-            source_wxid=(bot.cfg.data.get("app") or {}).get("self_wxid") or "")
+            source_wxid=(bot.cfg.data.get("app") or {}).get("self_wxid") or "",
+            config_yaml=cfg_yaml)
         body = json.dumps(data, ensure_ascii=False, indent=1)
         fname = quote(time.strftime("wxbot_knowledge_%Y%m%d_%H%M%S.json"))
         return Response(body, mimetype="application/json",
@@ -1292,18 +1330,49 @@ def start_web(bot):
     def knowledge_import():
         f = request.files.get("file")
         overwrite = bool(request.form.get("overwrite"))
+        restore_cfg = bool(request.form.get("restore_cfg"))
         try:
             data = json.loads(f.read().decode("utf-8")) if f else None
             if not isinstance(data, dict):
                 raise ValueError("文件内容不是有效的导出 JSON")
             counts = bot.store.import_knowledge(data, overwrite=overwrite)
+            cfg_restored = False
+            if restore_cfg and data.get("config_yaml"):
+                with open(bot.cfg.path, "w", encoding="utf-8") as fh:
+                    fh.write(str(data["config_yaml"]))
+                bot.cfg.reload()
+                _hot_apply()
+                cfg_restored = True
         except Exception as e:
             _flash["msg"] = f"导入失败：{html.escape(str(e))}"
             return redirect("/")
-        _flash["msg"] = (f"导入完成：群友画像 {counts['profiles']} 条、"
-                         f"私聊记忆 {counts['memories']} 条、"
-                         f"问答沉淀 {counts['mined_qa']} 条"
-                         "（已存在且未勾选覆盖的条目跳过）")
+        msg = (f"导入完成：群友画像 {counts.get('profiles', 0)} 条、"
+               f"私聊记忆 {counts.get('memories', 0)} 条、"
+               f"问答沉淀 {counts.get('mined_qa', 0)} 条、"
+               f"待沉淀问题 {counts.get('qa_pending', 0)} 条、"
+               f"未解诉求 {counts.get('pending_issues', 0)} 条"
+               "（已存在且未勾选覆盖的条目跳过）")
+        if restore_cfg and not cfg_restored:
+            msg += "；文件里没有配置内容，配置未恢复"
+        elif cfg_restored:
+            msg += "；配置已恢复并生效"
+        _flash["msg"] = msg
+        return redirect("/")
+
+    @app.post("/contacts/mine")
+    def contacts_mine():
+        if not getattr(bot, "driver", None):
+            return _render(form_error="微信未连接，无法提炼记忆")
+        try:
+            c = (bot.cfg.data.get("contacts") or [])[int(request.form.get("idx"))]
+        except (TypeError, ValueError, IndexError):
+            return _render(form_error="参数错误")
+        inner = getattr(bot, "_bot", None) or bot
+        ok = bootstrap.start_contact_mining_async(
+            inner, c.get("display") or c.get("id") or "", limit=2000)
+        _flash["msg"] = (f"已开始提炼【{c.get('display') or c.get('id')}】的私聊长期记忆"
+                         "（后台运行，完成后自动生效）" if ok
+                         else "已有提炼任务在跑，稍后再试")
         return redirect("/")
 
     @app.post("/config")

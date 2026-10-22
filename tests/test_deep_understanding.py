@@ -221,11 +221,14 @@ def test_update_profile_failure_keeps_old(tmp_path):
     assert out == "旧画像"
 
 
-def test_active_members_excludes_self_and_ad():
+def test_active_members_includes_self_for_self_profile():
+    """v1.4.4 起本人也进画像（回复时融合双方画像），广告号仍被过滤。"""
     drv = _ProfilesDriver()
     drv.db = _ProfilesDB()
     ids = profiles.active_members(drv, "g1@chatroom")
-    assert ids == ["wxid_a", "wxid_b"]
+    assert "wxid_bot" in ids
+    assert "广告勿理" not in " ".join(ids)
+    assert ids[:2] == ["wxid_a", "wxid_b"]
 
 
 def test_store_profiles_roundtrip(tmp_path):
@@ -314,3 +317,19 @@ def test_member_lines_filters_by_sender():
     # 新到旧；图片 OCR 未就绪时降级为 [图片] 占位（仍算该成员的发言）
     assert d.member_lines("g@chatroom", "wxid_a") == ["收到", "[图片]", "大家看这张通知"]
     assert d.member_lines("g@chatroom", "wxid_b") == []
+
+
+# ---------- v1.4.4 定时增量画像 ----------
+
+def test_auto_profile_hours_switch():
+    class C:
+        data = {}
+    assert profiles.auto_profile_hours(C()) == 0.0
+
+    class C2:
+        data = {"app": {"auto_profile_hours": 6}}
+    assert profiles.auto_profile_hours(C2()) == 6.0
+
+    class C3:
+        data = {"app": {"auto_profile_hours": "abc"}}
+    assert profiles.auto_profile_hours(C3()) == 0.0
