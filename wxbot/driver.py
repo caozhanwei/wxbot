@@ -334,10 +334,11 @@ class WxDriver:
         return False, f"{why}（重试{_SEND_ATTEMPTS}次后放弃）"
 
     def send_quote(self, display, text, target_name="", target_content=""):
-        """带气泡引用发送，优先尝试 UIA 右键菜单「引用」，失败时安全降级为带前缀发送。"""
+        """带气泡引用发送：按提问正文定位那条消息（答题慢、期间别人插话
+        也不引错人），定位不到降级为带 @提问人 前缀的普通发送。"""
         try:
             if hasattr(self.uia, "quote_last_message"):
-                if self.uia.quote_last_message(display, text):
+                if self.uia.quote_last_message(display, text, target_text=target_content):
                     return True, "ok"
         except Exception as e:
             log.warning("原生引用发送异常，降级发送: %s", e)

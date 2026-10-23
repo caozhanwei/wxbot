@@ -1281,6 +1281,75 @@ class WeChatUIA:
                     return True
         return False
 
+    # ------------------------------------------------------------------ 引用定位
+
+    @staticmethod
+    def _locate_quote_point(ocr_items, target_text: str):
+        """在 OCR 结果里按正文定位目标消息行，返回行内坐标 (cx, cy) 或 None。
+
+        ocr_items: [(text, x, y, w, h), ...]（ScreenOCR.recognize 输出）。
+        背景：答疑要几十秒，期间别人插话后"最新一行"已不是提问人那条，
+        盲目引用最新一行会回错人，必须按正文定位。匹配分级（去空白后）：
+          0 行文本以 probe 开头（真消息以正文开头；引用回显以"昵称:"开头）
+          1 行文本包含 probe（目标前 12 字）
+          2 包含 core（前 6 字，兜长消息换行拆行）
+          3 包含 tail（结尾 12 字，兜开头被 OCR 弄脏）
+        同级取最底部（最新）命中。超短目标（<4 字）只允许开头精确命中。
+        """
+        t = re.sub(r"\s+", "", target_text or "")
+        if not t:
+            return None
+        if len(t) < 4:
+            probes = [(0, t)]
+        else:
+            probe, core, tail = t[:12], t[:6], t[-12:]
+            probes = [(0, probe), (1, probe)]
+            if len(core) >= 4:
+                probes.append((2, core))
+            if len(t) >= 8 and tail != probe:
+                probes.append((3, tail))
+        best = None   # ((level, -bottom), cx, cy)
+        for text, x, y, w, h in ocr_items:
+            n = re.sub(r"\s+", "", text or "")
+            if not n:
+                continue
+            for level, p in probes:
+                if n.startswith(p) if level == 0 else (p in n):
+                    key = (level, -(y + h))
+                    if best is None or key < best[0]:
+                        best = (key, x + w // 2, y + h // 2)
+                    break
+        return (best[1], best[2]) if best else None
+
+    def _locate_message_pt(self, target_text: str) -> Optional[Tuple[int, int]]:
+        """OCR 可视消息区按正文定位目标消息并右键它，返回坐标；失败 None。"""
+        lst = self._message_list()
+        if lst is None:
+            return None
+        try:
+            from wechatauto.guia import ScreenOCR
+            import PIL.ImageGrab as IG
+        except Exception:
+            return None
+        try:
+            r = lst.BoundingRectangle
+            img = IG.grab(bbox=(r.left, r.top, r.right, r.bottom))
+            res = ScreenOCR.recognize(img)
+        except Exception as e:
+            wxlog.debug("引用定位 OCR 失败：%s", e)
+            return None
+        # recognize 的坐标相对截图，换算回屏幕坐标
+        items = [(t, x + r.left, y + r.top, w, h) for (t, x, y, w, h) in res]
+        pt = self._locate_quote_point(items, target_text)
+        if pt is None:
+            return None
+        cx, cy = int(pt[0]), int(pt[1])
+        self._set_cursor(cx, cy)
+        rhythm.nap(0.2)
+        self._right_click()
+        rhythm.nap(1.0)
+        return (cx, cy)
+
     def _right_click_latest_row(self, who: Optional[str] = None) -> Optional[Tuple[int, int]]:
         """打开会话并右键最新一条消息行，返回气泡内右键坐标 (x, y)；失败返回 None。"""
         if not self.ensure_window():
@@ -1435,9 +1504,24 @@ class WeChatUIA:
                     return True
         return False
 
-    def quote_last_message(self, who: Optional[str] = None, text: str = "") -> bool:
-        """引用当前会话最新一条消息并输入发送内容。"""
-        pos = self._right_click_latest_row(who)
+    def quote_last_message(self, who: Optional[str] = None, text: str = "",
+                           target_text: Optional[str] = None) -> bool:
+        """引用消息并输入发送内容。
+
+        target_text 给定时按正文 OCR 定位那条消息再右键引用——答疑要几十秒，
+        期间别人插话后"最新一行"已不是提问人那条，盲目引用最新一行会回错人；
+        定位不到返回 False 交由上层降级（带 @提问人 前缀），绝不退回引最新。
+        省略 target_text 时保持旧行为：引用当前会话最新一条消息。
+        """
+        if not self.ensure_window():
+            return False
+        if who and self.current_chat() != who:
+            if not self.open_chat(who):
+                return False
+        if target_text:
+            pos = self._locate_message_pt(target_text)
+        else:
+            pos = self._right_click_latest_row(None)
         if pos is None:
             return False
         item = self._uia_find_menu_item("引用")
@@ -1664,3 +1748,7 @@ class WeChatUIA:
                 walk(k, d + 1)
 
         walk(win)
+
+
+# 模块级别名：纯函数匹配器可独立单测/复用（见 WeChatUIA._locate_quote_point）
+locate_quote_text = WeChatUIA._locate_quote_point
