@@ -4,6 +4,7 @@ import html
 import io
 import json
 import logging
+import os
 import threading
 import time
 import zipfile
@@ -12,7 +13,7 @@ from urllib.parse import quote
 import yaml
 from flask import Flask, Response, request, redirect, render_template_string
 
-from . import bootstrap, mining, profiles as profiles_mod
+from . import bootstrap, mining, profiles as profiles_mod, updater
 
 log = logging.getLogger("wxbot.web")
 
@@ -21,10 +22,10 @@ _PAGE_SIZE = 20   # 画像/问答库浏览页大小
 _NAV = [("仪表盘", "#top"), ("最近会话", "#recent"), ("私聊联系人", "#contacts"),
         ("人设库", "#personas"), ("群管理与答疑", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
         ("运行日志", "#logs"), ("待沉淀问题", "#pending"), ("群历史挖掘", "#mine"),
-        ("群友画像", "#profiles"), ("高级 YAML", "#yaml")]
+        ("群友画像", "#profiles"), ("高级 YAML", "#yaml"), ("关于", "#about")]
 
 _PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-{% if mine_status.running or profile_status.running or bootstrap_status.running %}<meta http-equiv="refresh" content="5">{% endif %}
+{% if mine_status.running or profile_status.running or bootstrap_status.running or update_status.state == 'downloading' %}<meta http-equiv="refresh" content="5">{% endif %}
 <title>微信智能助手控制台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -817,6 +818,61 @@ details summary:hover{color:var(--primary)}
   </details>
 </div>
 
+<!-- 关于与在线更新 -->
+<a name="about"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">关于与更新</div>
+    <span class="card-subtitle">当前版本、检查新版与一键升级（数据在 %APPDATA%，升级不丢）</span>
+  </div>
+  <div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">
+    <b>微信智能助手（wxbot）</b>
+    <span class="brand-status">当前版本 <b style="font-family:Consolas,monospace">v{{ app_version }}</b></span>
+    <form method="post" action="/update/check">
+      <button class="btn btn-sm btn-primary">🔍 检查更新</button>
+    </form>
+    <span class="muted" style="font-size:12px">检查与下载走 GitHub Releases，需本机能访问 github.com</span>
+  </div>
+  {% if update_check %}
+  <div style="margin-top:12px">
+    {% if not update_check.ok %}
+      <div class="alert alert-danger"><span class="err">{{ update_check.message }}</span></div>
+    {% elif not update_check.newer %}
+      <div class="alert alert-success">✓ 已是最新版本（服务端 {{ update_check.latest or '?' }}）</div>
+    {% else %}
+      <div class="alert alert-warning">
+        <b>发现新版本 {{ update_check.latest }}</b>（当前 v{{ app_version }}）
+        {% if update_status.state == 'downloading' %}
+          <br>正在下载新版本安装包：{{ '%.1f' % (update_status.progress / 1048576.0) }} MB
+          {% if update_status.total %} / {{ '%.1f' % (update_status.total / 1048576.0) }} MB{% endif %}
+          …（页面每 5 秒自动刷新，下载完成后出现安装按钮）
+        {% elif update_status.state == 'ready' %}
+          <br>新版本已下载完成，点下面按钮立即升级（机器人会短暂离线 1~2 分钟，聊天记录/画像/配置全部保留）：
+          <form method="post" action="/update/apply"
+                onsubmit="return confirm('立即退出并升级到 {{ update_check.latest }}？安装完成后自动重启')">
+            <button class="btn btn-primary">🚀 立即安装并重启</button>
+          </form>
+        {% elif update_status.state == 'error' %}
+          <br><span class="err">下载失败：{{ update_status.error }}</span>
+          <form method="post" action="/update/download">
+            <button class="btn btn-sm">重试下载</button>
+          </form>
+        {% else %}
+          <form method="post" action="/update/download" style="margin-top:8px">
+            <button class="btn btn-primary">⬇ 下载新版本安装包（约 110MB）</button>
+          </form>
+        {% endif %}
+        {% if update_check.notes %}
+          <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">更新内容</summary>
+            <pre style="white-space:pre-wrap;margin-top:6px;max-height:220px;overflow:auto">{{ update_check.notes }}</pre>
+          </details>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
 </div>
 <script>
 (function(){
@@ -841,6 +897,7 @@ details summary:hover{color:var(--primary)}
 
 
 _recent_cache = {"ts": 0.0, "rows": []}
+_UPDATE_CHECK = {}   # {"res": check_latest() 结果}，模块级便于测试清理
 
 
 def _recent_chats(bot):
@@ -993,6 +1050,9 @@ def start_web(bot):
             p_total=bot.store.profiles_count(p_grp or None),
             p_prev=(_href(p_page=p_page - 1) if p_page > 1 else ""),
             p_next=(_href(p_page=p_page + 1) if p_page < p_pages else ""),
+            app_version=updater.current_version(),
+            update_check=_UPDATE_CHECK.get("res"),
+            update_status=updater.status(),
             cfg_text=yaml.safe_dump(snap, allow_unicode=True, sort_keys=False))
 
     @app.route("/")
@@ -1011,6 +1071,44 @@ def start_web(bot):
             bot.store.remove_task(tid)
             _flash["msg"] = f"已删除定时任务 #{tid}"
         return redirect("/")
+
+    # ---------- 在线更新 ----------
+    @app.post("/update/check")
+    def update_check():
+        _UPDATE_CHECK["res"] = updater.check_latest()
+        return redirect("/#about")
+
+    @app.post("/update/download")
+    def update_download():
+        res = _UPDATE_CHECK.get("res") or {}
+        if not (res.get("ok") and res.get("newer") and res.get("msi_url")):
+            _flash["msg"] = "请先点「检查更新」"
+            return redirect("/#about")
+        st = updater.status()
+        if st["state"] == "downloading":
+            _flash["msg"] = "正在下载中，见下方进度…"
+        elif st["state"] == "ready":
+            _flash["msg"] = "新版本已下载完成，可直接安装"
+        else:
+            updater.download_async(res["msi_url"], res["latest"])
+            _flash["msg"] = f"开始下载 {res['latest']} 安装包（约 110MB），进度见下方…"
+        return redirect("/#about")
+
+    @app.post("/update/apply")
+    def update_apply():
+        st = updater.status()
+        if st["state"] != "ready" or not st["msi"]:
+            _flash["msg"] = "新版本还没下载完成"
+            return redirect("/#about")
+        try:
+            updater.apply_update(st["msi"])
+        except Exception as e:
+            _flash["msg"] = f"启动升级失败：{e}"
+            return redirect("/#about")
+        return ('<meta charset="utf-8"><body style="font-family:system-ui;padding:40px;'
+                'text-align:center"><h2>🚀 正在升级到新版本…</h2>'
+                '<p>应用即将自动退出，安装完成后会自动重启（约 1~2 分钟）。</p>'
+                '<p>若 2 分钟后没有自动重启，可手动从开始菜单启动「微信智能助手」。</p></body>')
 
     @app.post("/pause")
     def pause():
