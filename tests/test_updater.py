@@ -237,3 +237,93 @@ def test_check_latest_defaults_to_builtin_mirror(monkeypatch):
     assert seen["url"].startswith(updater.DEFAULT_MIRROR)
     assert seen["url"].endswith("/manifest.json")
     assert res["ok"] and res["latest"] == "v9.9.9"
+
+
+# ---------- 下载健壮化：校验 / 卡死自愈 ----------
+
+def _wait_terminal():
+    for _ in range(200):
+        if updater.status()["state"] in ("ready", "error"):
+            return updater.status()
+        threading.Event().wait(0.05)
+    return updater.status()
+
+
+def test_check_latest_mirror_carries_sha256_size(monkeypatch):
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda *a, **k: _ManifestResp(
+                            {"version": "v9.9.9", "msi": "wxbot-v9.9.9.msi",
+                             "sha256": "ABCD1234", "size": 10}))
+    res = updater.check_latest(mirror="http://m")
+    assert res["sha256"] == "abcd1234" and res["size"] == 10
+
+
+def test_download_async_verifies_sha256_ok(tmp_path, monkeypatch):
+    import hashlib
+    body = b"hello wxbot"
+    monkeypatch.setattr(updater, "_update_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda url, stream=True, timeout=None, headers=None:
+                        _FakeStreamResp([body]))
+    good = hashlib.sha256(body).hexdigest()
+    updater.download_async("https://x/wxbot-v9.9.9.msi", "v9.9.9", sha256=good, size=len(body))
+    st = _wait_terminal()
+    assert st["state"] == "ready", st
+    assert os.path.exists(st["msi"])
+
+
+def test_download_async_bad_sha256_rejected_and_cleaned(tmp_path, monkeypatch):
+    body = b"hello wxbot"
+    monkeypatch.setattr(updater, "_update_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda url, stream=True, timeout=None, headers=None:
+                        _FakeStreamResp([body]))
+    updater.download_async("https://x/wxbot-v9.9.9.msi", "v9.9.9",
+                           sha256="dead" * 16, size=len(body))
+    st = _wait_terminal()
+    assert st["state"] == "error" and "sha256" in st["error"]
+    leftovers = [p for p in os.listdir(str(tmp_path)) if p.endswith((".msi", ".part"))]
+    assert not leftovers          # 坏包删干净，绝不留给"一键安装"
+
+
+def test_download_async_size_mismatch_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "_update_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda url, stream=True, timeout=None, headers=None:
+                        _FakeStreamResp([b"12345"]))       # 实得 5 字节
+    updater.download_async("https://x/wxbot-v9.9.9.msi", "v9.9.9", size=99)
+    st = _wait_terminal()
+    assert st["state"] == "error" and "大小不符" in st["error"]
+
+
+def test_download_async_dead_thread_allows_restart(tmp_path, monkeypatch):
+    """state 卡在 downloading 但线程已死：再调 download_async 必须重新发起。"""
+    monkeypatch.setattr(updater, "_update_dir", lambda: str(tmp_path))
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    updater._STATUS.update(state="downloading", progress=1, total=0, msi="",
+                           latest="v9.9.9", error="")
+    updater._DL_THREAD[0] = dead
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda url, stream=True, timeout=None, headers=None:
+                        _FakeStreamResp([b"abc"]))
+    assert updater.download_async("https://x/wxbot-v9.9.9.msi", "v9.9.9") is True
+    st = _wait_terminal()
+    assert st["state"] == "ready"
+
+
+def test_download_async_live_thread_blocked(tmp_path, monkeypatch):
+    class _Alive:
+        def is_alive(self):
+            return True
+
+    updater._STATUS.update(state="downloading", progress=1, total=0, msi="",
+                           latest="v9.9.9", error="")
+    updater._DL_THREAD[0] = _Alive()
+    try:
+        assert updater.download_async("https://x/wxbot-v9.9.9.msi", "v9.9.9") is False
+    finally:
+        updater._DL_THREAD[0] = None
+        updater._STATUS.update(state="idle", progress=0, total=0, msi="",
+                               latest="", error="", ts=0.0)

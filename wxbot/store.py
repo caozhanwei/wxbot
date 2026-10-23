@@ -140,6 +140,13 @@ class Store:
                 "INSERT INTO mined(ts,grp,question,answer) VALUES(?,?,?,?)",
                 [(time.time(), grp, str(q)[:200], str(a)[:400]) for q, a in pairs])
 
+    def mined_count_since(self, grp, since):
+        """某群自 since 起新增的沉淀问答数（周报用）。"""
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) AS n FROM mined WHERE grp=? AND ts>=?",
+                            (grp, float(since))).fetchone()
+            return int(row["n"]) if row else 0
+
     def mined_pairs(self, grp=None, limit=50, offset=0, theme=None):
         cond, args = [], []
         if grp:

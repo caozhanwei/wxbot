@@ -230,9 +230,12 @@ class Bot:
         from .scheduler import DailyJob, Scheduler
         dd = self.cfg.app.get("daily_digest") or {}
         cc = self.cfg.app.get("care") or {}
+        wk = self.cfg.app.get("weekly_report") or {}
         self._scheduler = Scheduler(self, [
             DailyJob("digest", int(dd.get("hour") or 21), fn=_digest.run_digest),
-            DailyJob("care", int(cc.get("hour") or 10), fn=_care.run_care)])
+            DailyJob("care", int(cc.get("hour") or 10), fn=_care.run_care),
+            DailyJob("weekly", int(wk.get("hour") or 9), minute=30,
+                     fn=_digest.run_weekly)])
         self._scheduler.start()
         while True:
             if self.cfg.maybe_reload():
@@ -456,9 +459,12 @@ class Bot:
             if m["type"] == "系统消息":
                 if group_logic.leave_name(m["content"]):
                     self.notify_admins(f"[群秩序] {w['display']}：{(m['content'] or '')[:60]}")
-                if mg.get("welcome"):
-                    name = group_logic.join_name(m["content"])
-                    if name:
+                name = group_logic.join_name(m["content"])
+                if name:
+                    # 新成员登记（广告观察用，与欢迎开关无关）：[进群时间, 已观察条数, 已告警]
+                    self.state.setdefault("new_members", {}).setdefault(
+                        w["user"], {})[name] = [time.time(), 0, 0]
+                    if mg.get("welcome"):
                         self._welcome(w, name)
                 continue
             if m["is_self"] or not m["sender"]:
@@ -473,6 +479,7 @@ class Bot:
                     digest.record_at_missed(self, w, m)
                 continue
             self._track_flood(w, m)
+            self._track_ads(w, m)
             word = None
             if mg.get("forbidden_words"):
                 word = group_logic.forbidden_hit(m["content"], mg["forbidden_words"])
@@ -504,6 +511,40 @@ class Bot:
         who = m.get("sender_display") or m["sender"]
         self.notify_admins(f"[群秩序] {w['display']} 的 {who} 1 分钟内连发 "
                            f"{len(dq)} 条消息，疑似刷屏，请关注")
+
+    def _track_ads(self, w, m):
+        """新成员广告嫌疑：进群 24h 内的前 10 条消息，命中 ≥2 个广告特征
+        → 告警管理员附证据（每人每群只告一次）。只告警不动人，踢人走 #踢 人工确认。"""
+        order = ((w["cfg"].get("manage") or {}).get("order") or {})
+        if not order.get("ads_watch", True):
+            return
+        gid = w["user"]
+        news = (self.state.get("new_members") or {}).get(gid)
+        if not news:
+            return
+        who = m.get("sender_display") or ""
+        now = time.time()
+        target = None
+        for name, rec in list(news.items()):
+            if now - rec[0] > 86400:
+                del news[name]              # 观察窗过期，懒清理
+                continue
+            same = who and (who == name or (len(name) >= 2 and name in who)
+                            or (len(who) >= 2 and who in name))
+            if same and rec[1] < 10 and not rec[2]:
+                target = (name, rec)
+                break
+        if target is None:
+            return
+        name, rec = target
+        rec[1] += 1
+        marks = group_logic.ads_markers(m["content"], order.get("ads_keywords") or [])
+        if len(marks) < 2:
+            return
+        rec[2] = 1
+        self.notify_admins(
+            f"[广告嫌疑] {w['display']} 新成员「{who}」：{(m['content'] or '')[:60]}\n"
+            f"特征：{'、'.join(marks[:5])}。确认违规可发：#踢 {who}")
 
     def _welcome(self, w, name):
         text = ((w["cfg"].get("manage") or {}).get("welcome_text")
@@ -990,7 +1031,8 @@ class Bot:
     def _do_admin(self, name, args):
         if name in ("帮助", "help", ""):
             return ("命令：#状态 #暂停 #恢复 #补报 #急停主动 #恢复主动 "
-                    "#开 <名> #关 <名> #重载 #待审 #提醒 #销项 #催办 #已解\n"
+                    "#开 <名> #关 <名> #重载 #待审 #提醒 #销项 #催办 #已解 "
+                    "#踢 <昵称> [群名] #确认踢 #取消踢\n"
                     "（联系人/群名单与开关在 bot_config.yaml 或网页配置）")
         if name == "状态":
             ups = int(time.time() - self.state["start"])
@@ -1053,4 +1095,86 @@ class Bot:
         if name == "已解":
             from . import followup
             return followup.cmd_resolve(self, args)
+        if name == "踢" and args:
+            return self._cmd_kick(args)
+        if name == "确认踢":
+            return self._cmd_kick_confirm()
+        if name == "取消踢":
+            if self.state.get("kick_pending"):
+                self.state["kick_pending"] = None
+                return "已取消移出操作"
+            return "没有待确认的移出操作"
         return f"未知命令 #{name}，#帮助 查看"
+
+    # ---------- #踢 二次确认（破坏性动作必须人工点头） ----------
+
+    def _kick_evidence(self, gid, member):
+        """近 80 条里找 member 最新一条发言（展示证据 + 定位探针）。"""
+        try:
+            rows = self.driver.db.get_messages(gid, limit=80) or []
+        except Exception:
+            return None
+        for r in reversed(rows):
+            nick = (r.get("sender_nickname") or "").strip()
+            if nick and (nick == member or member in nick or nick in member):
+                return r
+        return None
+
+    def _cmd_kick(self, args):
+        groups = [w for w in self.watch if w.get("kind") == "group"]
+        if not groups:
+            return "没有监控中的群"
+        member = " ".join(args).strip()
+        gname = None
+        hit = next((g for g in groups if g["display"] == args[-1]), None)
+        if hit is not None and len(args) >= 2:
+            gname, member = args[-1], " ".join(args[:-1]).strip()
+        elif len(groups) == 1:
+            gname = groups[0]["display"]
+        else:
+            return ("监控了多个群，请带上群名：#踢 昵称 群名\n"
+                    + " / ".join(g["display"] for g in groups[:6]))
+        if not member:
+            return "用法：#踢 昵称 [群名]"
+        if member == (getattr(self.driver, "self_name", "") or ""):
+            return "这是机器人自己的昵称，不动"
+        gid = next(g["user"] for g in groups if g["display"] == gname)
+        probe = ""
+        row = self._kick_evidence(gid, member)
+        if row:
+            probe = (row.get("content") or "").split("\n")[-1].strip()[:40]
+        self.state["kick_pending"] = {"gid": gid, "gname": gname, "member": member,
+                                      "probe": probe, "ts": time.time()}
+        ev = f"TA 近期发言：{probe}" if probe else "（近 80 条没找到 TA 的发言，请核对昵称）"
+        return (f"准备把【{gname}】的「{member}」移出群聊\n{ev}\n"
+                f"确认发 #确认踢 · 取消发 #取消踢（5 分钟内有效）")
+
+    def _cmd_kick_confirm(self):
+        p = self.state.get("kick_pending")
+        if not p:
+            return "没有待确认的移出操作，先用 #踢 昵称"
+        if time.time() - p.get("ts", 0) > 300:
+            self.state["kick_pending"] = None
+            return f"确认已超时（超 5 分钟），请重新发 #踢 {p.get('member', '')}"
+        self.state["kick_pending"] = None        # 先清待确认，防重复执行
+        gname, member, probe = p["gname"], p["member"], p.get("probe") or ""
+        if self.cfg.dry_run:
+            self.store.audit("admin", "kick_dry", f"[{gname}] {member}")
+            return f"(演练) dry_run 模式不实际移出：【{gname}】「{member}」"
+
+        def _go():
+            ok = False
+            try:
+                ok = self.driver.kick_member(gname, member, probe=probe)
+            except Exception as e:
+                log.warning("移出群聊执行异常(%s/%s): %s", gname, member, e)
+            if ok:
+                self.store.audit("admin", "kick", f"[{gname}] {member}")
+                self.notify_admins(f"已移出【{gname}】的「{member}」")
+            else:
+                self.notify_admins(
+                    f"自动移出没走完（没定位到消息或菜单），请手动处理："
+                    f"【{gname}】群设置 → 群成员 → 「{member}」→ 移出群聊")
+
+        threading.Thread(target=_go, daemon=True).start()
+        return f"正在移出【{gname}】的「{member}」，结果稍后通知"

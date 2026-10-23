@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """版本检查与一键自更新：查 GitHub Releases 最新版 → 流式下载 MSI → 分离升级脚本
 （等主进程退出 → msiexec 静默安装 → 重启）。全程不阻塞 Web 控制台。"""
+import hashlib
 import os
 import re
 import subprocess
 import threading
+import time
 
 import requests
 
@@ -16,7 +18,8 @@ API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 DEFAULT_MIRROR = "http://118.196.92.227:21120/wxbot-update"
 _UA = {"User-Agent": f"wxbot-updater/{VERSION}"}
 
-_STATUS = {"state": "idle", "progress": 0, "total": 0, "msi": "", "latest": "", "error": ""}
+_STATUS = {"state": "idle", "progress": 0, "total": 0, "msi": "", "latest": "", "error": "", "ts": 0.0}
+_DL_THREAD = [None]   # 下载线程引用；"state=downloading 但线程早死了" 靠它识别自愈
 
 
 def current_version() -> str:
@@ -48,8 +51,13 @@ def _check_mirror(base, timeout) -> dict:
     if not tag or not msi:
         return {"ok": False, "latest": "", "newer": False, "msi_url": "",
                 "notes": "", "message": "镜像源 manifest 缺 version/msi"}
+    try:
+        size = int(d.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
     return {"ok": True, "latest": tag, "newer": is_newer(tag),
             "msi_url": f"{base}/{msi}", "notes": str(d.get("notes") or "").strip()[:1200],
+            "sha256": str(d.get("sha256") or "").strip().lower(), "size": size,
             "message": ""}
 
 
@@ -78,11 +86,29 @@ def check_latest(timeout=10, mirror="") -> dict:
             msi_url = str(a.get("browser_download_url") or "")
             break
     return {"ok": True, "latest": tag, "newer": is_newer(tag), "msi_url": msi_url,
-            "notes": str(d.get("body") or "").strip()[:1200], "message": ""}
+            "notes": str(d.get("body") or "").strip()[:1200],
+            "sha256": "", "size": 0, "message": ""}
 
 
 def status() -> dict:
     return dict(_STATUS)
+
+
+def download_alive() -> bool:
+    """下载线程是否还活着（state=downloading 但线程已死=卡死，可安全重启下载）。"""
+    t = _DL_THREAD[0]
+    return bool(t and t.is_alive())
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(1 << 20)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
 
 
 def _update_dir() -> str:
@@ -90,32 +116,53 @@ def _update_dir() -> str:
     return os.path.join(base, "wxbot_update")
 
 
-def download_async(msi_url: str, latest: str) -> bool:
-    """后台线程下载 MSI（.part 临时文件，完成后原子改名）。进行中重复调用返回 False。"""
-    if _STATUS["state"] == "downloading":
+def download_async(msi_url: str, latest: str, sha256: str = "", size: int = 0) -> bool:
+    """后台线程下载 MSI（.part 临时文件，完成后原子改名）。
+
+    镜像 manifest 提供 sha256/size 时下载完自动校验，坏包删除并报错——
+    绝不让损坏安装包进入"一键安装"（装坏了 app 起不来只能人工救）。
+    state=downloading 但线程已死（历史卡死）时允许重新发起，自愈。
+    """
+    if _STATUS["state"] == "downloading" and download_alive():
         return False
-    _STATUS.update(state="downloading", progress=0, total=0, msi="", latest=latest, error="")
+    _STATUS.update(state="downloading", progress=0, total=0, msi="", latest=latest,
+                   error="", ts=time.time())
 
     def _run():
+        dest, replaced = "", False
         try:
             os.makedirs(_update_dir(), exist_ok=True)
             name = os.path.basename((msi_url or "").split("?")[0]) or "wxbot-update.msi"
             dest = os.path.join(_update_dir(), name)
             with requests.get(msi_url, stream=True, timeout=(10, 300), headers=_UA) as r:
                 r.raise_for_status()
-                _STATUS["total"] = int(r.headers.get("Content-Length") or 0)
+                _STATUS["total"] = int(r.headers.get("Content-Length") or 0) or int(size or 0)
                 done = 0
                 with open(dest + ".part", "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
                         f.write(chunk)
                         done += len(chunk)
                         _STATUS["progress"] = done
+                        _STATUS["ts"] = time.time()
             os.replace(dest + ".part", dest)
-            _STATUS.update(state="ready", msi=dest)
+            replaced = True
+            if size and done != int(size):
+                raise RuntimeError(f"大小不符：应 {size} 实得 {done}")
+            if sha256 and _file_sha256(dest) != sha256.lower():
+                raise RuntimeError("sha256 校验不符，安装包可能损坏")
+            _STATUS.update(state="ready", msi=dest, ts=time.time())
         except Exception as e:
-            _STATUS.update(state="error", error=f"{type(e).__name__}: {e}")
+            # 半成品必删；最终文件只在"替换后校验失败"才删（网络失败不误删旧好包）
+            for junk in ([dest + ".part"] + ([dest] if replaced else []) if dest else []):
+                try:
+                    os.remove(junk)
+                except OSError:
+                    pass
+            _STATUS.update(state="error", error=f"{type(e).__name__}: {e}", ts=time.time())
 
-    threading.Thread(target=_run, daemon=True).start()
+    t = threading.Thread(target=_run, daemon=True)
+    _DL_THREAD[0] = t
+    t.start()
     return True
 
 
@@ -141,6 +188,8 @@ def _install_dir() -> str:
 def apply_update(msi_path: str, exe_path=None) -> str:
     """写升级脚本并分离启动：脚本自行等 3 秒→杀 wxbot.exe→静默装→成功后清 MSI 并重启。
     返回脚本路径。调用方随后自行展示告别页即可（进程 3 秒后被脚本终止）。"""
+    if not (msi_path and os.path.exists(msi_path)):
+        raise FileNotFoundError(f"安装包不存在：{msi_path}")
     exe_path = exe_path or os.path.join(_install_dir(), "wxbot.exe")
     script = os.path.join(os.path.dirname(os.path.abspath(msi_path)), "apply_update.ps1")
     # utf-8-sig：PowerShell 5 靠 BOM 识别 UTF-8，中文路径才不会乱码

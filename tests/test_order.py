@@ -94,3 +94,60 @@ def test_welcome_without_themes_plain(tmp_path):
     logs = [r for r in b.store.recent_logs(20) if r["kind"] == "welcome"]
     assert logs and "新人小李" in logs[0]["detail"]
     assert "常见话题" not in logs[0]["detail"]           # 没主题库不加尾巴
+
+
+# ---------- 广告号识别（只告警，踢人走 #踢 人工确认） ----------
+
+def test_ads_markers_basics():
+    from wxbot import group_logic
+    ms = group_logic.ads_markers("加微信领优惠券 私聊我 http://x.cn/abcd")
+    assert "链接" in ms and "加微信" in ms and "优惠券" in ms and "私聊我" in ms
+    assert group_logic.ads_markers("正常聊天一句话") == []
+    assert group_logic.ads_markers("") == []
+    assert group_logic.ads_markers("今天群里团购白菜", extra=("团购",)) == ["团购"]
+
+
+def test_new_member_ads_alerts_once(tmp_path):
+    b = _mk_bot(tmp_path)
+    b.build_watch()
+    w = _group_w(b)
+    b._on_group_msgs(w, [_msg('"营销号"通过扫描二维码加入了群聊', mtype="系统消息", seq=401)])
+    b._on_group_msgs(w, [_msg("加微信领优惠券 私聊我秒到账 http://x.cn/a",
+                              name="营销号", sender="wxid_ad", seq=402)])
+    logs = [l for l in _notify_logs(b) if "广告嫌疑" in l["detail"]]
+    assert len(logs) == 1
+    assert "营销号" in logs[0]["detail"] and "#踢" in logs[0]["detail"]
+    # 再发也不重复告警
+    b._on_group_msgs(w, [_msg("加微信返利 http://y.cn/b", name="营销号",
+                              sender="wxid_ad", seq=403)])
+    assert len([l for l in _notify_logs(b) if "广告嫌疑" in l["detail"]]) == 1
+
+
+def test_old_member_ads_ignored(tmp_path):
+    """老人发广告不走新成员告警（避免误伤正常群友发链接）。"""
+    b = _mk_bot(tmp_path)
+    b.build_watch()
+    w = _group_w(b)
+    b._on_group_msgs(w, [_msg("加微信领优惠券 私聊我 http://x.cn/a", seq=404)])
+    assert not [l for l in _notify_logs(b) if "广告嫌疑" in l["detail"]]
+
+
+def test_single_marker_no_alert(tmp_path):
+    """单个特征（比如只发个链接）可能是正常分享，不告警。"""
+    b = _mk_bot(tmp_path)
+    b.build_watch()
+    w = _group_w(b)
+    b._on_group_msgs(w, [_msg('"小王"加入了群聊', mtype="系统消息", seq=405)])
+    b._on_group_msgs(w, [_msg("看这个 http://x.cn/ok", name="小王", sender="wxid_w", seq=406)])
+    assert not [l for l in _notify_logs(b) if "广告嫌疑" in l["detail"]]
+
+
+def test_ads_watch_off(tmp_path):
+    b = _mk_bot(tmp_path)
+    b.build_watch()
+    w = _group_w(b)
+    w["cfg"].setdefault("manage", {}).setdefault("order", {})["ads_watch"] = False
+    b._on_group_msgs(w, [_msg('"营销号"加入了群聊', mtype="系统消息", seq=407)])
+    b._on_group_msgs(w, [_msg("加微信领优惠券 私聊我 http://x.cn/a",
+                              name="营销号", sender="wxid_ad", seq=408)])
+    assert not [l for l in _notify_logs(b) if "广告嫌疑" in l["detail"]]

@@ -216,3 +216,76 @@ def test_on_private_msg_records_and_urgent_pushes(tmp_path):
         "type": "文本", "content": "周末聚聚", "ts": NOW})
     rows = bot.store.missed_unconsumed(src="private")
     assert len(rows) == 2 and rows[1]["urgency"] == "normal"
+
+
+# ---------- 周报 ----------
+
+import types
+
+
+def _at(monkeypatch, y, mo, d, h=9):
+    """把 digest 模块的时钟钉到指定时刻（避免全局污染 time 模块）。"""
+    import calendar
+    ts = calendar.timegm((y, mo, d, h - 8, 0, 0))   # 简化：按本地 UTC+8 折算
+    monkeypatch.setattr(digest_mod, "time",
+                        types.SimpleNamespace(time=lambda: ts))
+    return ts
+
+
+def _weekly_bot(tmp_path, **cfg):
+    bot = _FakeBot(tmp_path)
+    bot.cfg.data["app"]["weekly_report"] = dict(
+        {"enabled": True, "weekday": 0, "hour": 9}, **cfg)
+    return bot
+
+
+def _digest_logs(bot):
+    return [r for r in bot.store.recent_logs(60) if r["kind"] == "digest"]
+
+
+def test_run_weekly_pushes_report(tmp_path, monkeypatch):
+    _at(monkeypatch, 2026, 10, 26)                  # 周一
+    bot = _weekly_bot(tmp_path)
+    bot.store.add_mined("111@chatroom", [("问一", "答一"), ("问二", "答二")])
+    digest_mod.run_weekly(bot)
+    pushes = [r for r in _digest_logs(bot) if "周报" in (r["detail"] or "")]
+    assert len(pushes) == 1
+    body = pushes[0]["detail"]
+    assert "群甲" in body and "发言" in body and "活跃" in body
+    assert "本周沉淀 2 问" in body and "待解决" in body
+    assert pushes[0]["chat"] == PUSH
+
+
+def test_run_weekly_disabled_no_push(tmp_path, monkeypatch):
+    _at(monkeypatch, 2026, 10, 26)
+    bot = _weekly_bot(tmp_path, enabled=False)
+    digest_mod.run_weekly(bot)
+    assert not [r for r in _digest_logs(bot) if "周报" in (r["detail"] or "")]
+
+
+def test_run_weekly_wrong_weekday_no_push(tmp_path, monkeypatch):
+    _at(monkeypatch, 2026, 10, 27)                  # 周二
+    bot = _weekly_bot(tmp_path)
+    digest_mod.run_weekly(bot)
+    assert not [r for r in _digest_logs(bot) if "周报" in (r["detail"] or "")]
+
+
+def test_run_weekly_llm_failure_falls_back(tmp_path, monkeypatch):
+    _at(monkeypatch, 2026, 10, 26)
+    bot = _weekly_bot(tmp_path)
+
+    def _boom(group, lines, instruction):
+        raise RuntimeError("LLM 挂了")
+
+    bot.personas.summarize_day = _boom
+    digest_mod.run_weekly(bot)
+    pushes = [r for r in _digest_logs(bot) if "周报" in (r["detail"] or "")]
+    assert pushes and "[简版]" in pushes[0]["detail"]
+
+
+def test_run_weekly_silent_group_no_messages(tmp_path, monkeypatch):
+    _at(monkeypatch, 2026, 10, 26)
+    bot = _weekly_bot(tmp_path)
+    bot.driver.db.get_messages = lambda gid, limit=500, offset=0: []
+    digest_mod.run_weekly(bot)
+    assert not [r for r in _digest_logs(bot) if "周报" in (r["detail"] or "")]

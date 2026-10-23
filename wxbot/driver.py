@@ -345,5 +345,16 @@ class WxDriver:
         prefix = f"「回复 @{target_name}」" if target_name else "「引用回复」"
         return self.send_text(display, f"{prefix} {text}")
 
+    def kick_member(self, display, member, probe=""):
+        """移出群成员（登录号需为群主/管理员）。任何一步失败返回 False。
+
+        不做任何降级重试——踢人是破坏性动作，宁可失败交人工，绝不误伤。
+        """
+        try:
+            return bool(self.uia.kick_member(display, member, probe=probe))
+        except Exception as e:
+            log.warning("移出群聊异常(%s/%s): %s", display, member, e)
+            return False
+
 
 WeChatDriver = WxDriver

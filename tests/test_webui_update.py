@@ -83,7 +83,9 @@ def client(tmp_path, monkeypatch):
     app = webui.start_web(bot)
     app.testing = True
     yield app.test_client(), bot
-    updater._STATUS.update(state="idle", progress=0, total=0, msi="", latest="", error="")
+    updater._STATUS.update(state="idle", progress=0, total=0, msi="", latest="",
+                           error="", ts=0.0)
+    updater._DL_THREAD[0] = None
     webui._UPDATE_CHECK.clear()
 
 
@@ -142,7 +144,7 @@ def test_download_starts_and_progress_then_apply(client, monkeypatch, tmp_path):
 
     started = {}
 
-    def fake_dl(url, latest):
+    def fake_dl(url, latest, sha256="", size=0):
         started["url"] = url
         updater._STATUS.update(state="ready", msi=str(tmp_path / "wxbot-v9.9.9.msi"),
                                latest=latest, progress=1, total=1, error="")
@@ -160,6 +162,60 @@ def test_download_starts_and_progress_then_apply(client, monkeypatch, tmp_path):
     r = c.post("/update/apply")
     assert applied["msi"].endswith("wxbot-v9.9.9.msi")
     assert "安装" in r.data.decode("utf-8")
+
+
+def test_ready_shows_install_without_check(client):
+    """核心回归：下载已完成（ready）但页面没检查结果时，安装按钮也必须出现。
+
+    真机事故：下载完成后 UI 一直没反应——安装按钮被 update_check 条件包住，
+    页面一旦没刷新/检查结果丢失，用户就永远看不到下一步。
+    """
+    c, bot = client
+    updater._STATUS.update(state="ready", msi=r"C:\x\wxbot-v9.9.9.msi",
+                           latest="v9.9.9", progress=1, total=1, error="")
+    body = c.get("/").data.decode("utf-8")
+    assert "已下载完成" in body and "立即安装并重启" in body
+
+
+def test_downloading_shows_progress_and_endpoint(client, monkeypatch):
+    c, bot = client
+    updater._STATUS.update(state="downloading", progress=5 << 20, total=110 << 20,
+                           latest="v9.9.9", msi="", error="")
+    body = c.get("/").data.decode("utf-8")
+    assert "正在下载" in body and "dl-line" in body and "update/progress" in body
+    j = c.get("/update/progress").get_json()
+    assert j["state"] == "downloading" and j["progress"] == 5 << 20
+
+
+def test_download_dead_thread_restarts(client, monkeypatch):
+    """state=downloading 但下载线程已死（历史卡死）：再点下载要能自动重新发起。"""
+    c, bot = client
+    monkeypatch.setattr(webui.updater, "check_latest", _fake_check(newer=True))
+    c.post("/update/check")
+    updater._STATUS.update(state="downloading", progress=0, total=0,
+                           latest="v9.9.9", msi="", error="")
+    monkeypatch.setattr(webui.updater, "download_alive", lambda: False)
+    started = {}
+    monkeypatch.setattr(webui.updater, "download_async",
+                        lambda *a, **k: started.update(args=a) or True)
+    r = c.post("/update/download", follow_redirects=True)
+    assert started and started["args"][0].endswith(".msi")
+    assert "开始下载" in r.data.decode("utf-8")
+
+
+def test_download_alive_thread_not_restarted(client, monkeypatch):
+    c, bot = client
+    monkeypatch.setattr(webui.updater, "check_latest", _fake_check(newer=True))
+    c.post("/update/check")
+    updater._STATUS.update(state="downloading", progress=1, total=0,
+                           latest="v9.9.9", msi="", error="")
+    monkeypatch.setattr(webui.updater, "download_alive", lambda: True)
+    called = []
+    monkeypatch.setattr(webui.updater, "download_async",
+                        lambda *a, **k: called.append(a) or True)
+    r = c.post("/update/download", follow_redirects=True)
+    assert not called
+    assert "正在下载中" in r.data.decode("utf-8")
 
 
 def test_apply_requires_ready(client, monkeypatch):

@@ -89,6 +89,32 @@ def leave_name(content):
     return m.group(1) if m else None
 
 
+# 广告号常见话术特征：新成员进群即发这些，基本可断定营销号
+ADS_DEFAULT_KEYWORDS = (
+    "加微信", "加我vx", "加V信", "薇信", "兼职", "刷单", "返利", "优惠券",
+    "低价出", "秒到账", "日赚", "招代理", "招兼职", "办证", "开发票", "贷款",
+    "无抵押", "私聊我", "扫码进群", "免费领", "点击链接", "内部渠道",
+)
+_ADS_LINK = re.compile(r"https?://|www\.", re.I)
+
+
+def ads_markers(content, extra=()):
+    """文本命中的广告特征清单（去重）：链接记 1 个 + 命中的关键词。
+
+    告警阈值由调用方定（≥2 个特征才告警，单个词只可能是正常聊天）。"""
+    text = (content or "").strip()
+    if not text:
+        return []
+    marks = []
+    if _ADS_LINK.search(text):
+        marks.append("链接")
+    for kw in tuple(ADS_DEFAULT_KEYWORDS) + tuple(extra or ()):
+        kw = (kw or "").strip()
+        if kw and kw in text and kw not in marks:
+            marks.append(kw)
+    return marks
+
+
 def forbidden_hit(content, words):
     """返回命中的第一个违禁词，未命中返回 None。"""
     for w in words or []:

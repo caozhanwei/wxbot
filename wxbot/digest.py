@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .gate import Gate
 
@@ -201,6 +201,86 @@ def run_digest(bot):
                          if r.get("src") == "private"]
     bot.store.mark_missed_consumed(consumed)
     log.info("日报完成：%d 群，消化补报 %d 条", len(groups), len(consumed))
+
+
+# ---------- 周报 ----------
+
+_WEEK_MSG_LIMIT = 3000
+
+
+def _weekly_cfg(bot):
+    return (bot.cfg.data.get("app") or {}).get("weekly_report") or {}
+
+
+def run_weekly(bot):
+    """群活跃周报（app.weekly_report，默认关）：近 7 天每群 发言量/活跃人数/
+    本周沉淀/待解决 + LLM 热点摘要，合成一条总报推给 push_to。
+    只在配置的 weekday（0=周一，date.weekday() 语义）当天跑，其余天静默。"""
+    cfg = _weekly_cfg(bot)
+    if not cfg.get("enabled"):
+        return
+    now = time.time()
+    today = datetime.fromtimestamp(now).date()
+    try:
+        wd = int(cfg.get("weekday", 0) or 0)
+    except (TypeError, ValueError):
+        wd = 0
+    if today.weekday() != wd:
+        return
+    from . import mining
+    push_to = str(cfg.get("push_to") or "").strip() or _push_target(bot)
+    groups = [w for w in bot.watch if w.get("kind") == "group"]
+    cutoff = now - 7 * 24 * 3600
+    secs, total_msg, total_act = [], 0, 0
+    for w in groups:
+        gid, gname = w["user"], w["display"]
+        try:
+            rows = bot.driver.db.get_messages(gid, limit=_WEEK_MSG_LIMIT) or []
+        except Exception as e:
+            log.warning("周报取数失败(%s): %s", gname, e)
+            rows = []
+        rows = [r for r in rows
+                if (r.get("create_time") or 0) >= cutoff and r.get("sender_username")]
+        if not rows:
+            continue
+        items = mining._normalize(bot.driver, rows)
+        lines = [x["line"] for x in items][-500:]
+        speakers = {x.get("sender") or x.get("name") or "" for x in items}
+        active = len([s for s in speakers if s])
+        hot = ""
+        try:
+            hot = bot.personas.summarize_day(
+                gname, lines,
+                "总结过去7天群里的热点话题与重要进展，两三句话，口语化简洁")
+        except Exception as e:
+            log.warning("周报摘要失败(%s): %s", gname, e)
+        if not hot:
+            hot = f"[简版] 高频词：{_top_words(lines) or '无'}"
+        try:
+            mined_n = bot.store.mined_count_since(gid, cutoff)
+        except Exception:
+            mined_n = 0
+        try:
+            pend_n = bot.store.pending_issues_count(grp=gid)
+        except Exception:
+            pend_n = 0
+        secs.append(f"【{gname}】发言 {len(lines)} 条 · 活跃 {active} 人 · "
+                    f"本周沉淀 {mined_n} 问 · 待解决 {pend_n}\n{hot}")
+        total_msg += len(lines)
+        total_act += active
+    if not secs:
+        return
+    rng = (f"{(today - timedelta(days=6)).strftime('%m-%d')} ~ "
+           f"{today.strftime('%m-%d')}")
+    body = (f"📊 群活跃周报 {rng}\n（{len(secs)} 个群 · 共 {total_msg} 条发言 · "
+            f"{total_act} 人次活跃）\n\n" + "\n\n".join(secs))
+    g = _gate(bot)
+    ok, why = g.allow("weekly", push_to, body) if g else (True, "ok")
+    if not ok:
+        log.warning("周报被闸门拦截: %s", why)
+        return
+    if bot.send(push_to, body, "digest"):
+        log.info("周报已推送 → %s", push_to)
 
 
 def report_missed_now(bot):

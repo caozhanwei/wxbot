@@ -1582,6 +1582,170 @@ class WeChatUIA:
         self._restore_chat_bottom()
         return False
 
+    # ------------------------------------------------------------------ 移出群聊（#踢 人工确认后执行）
+
+    def _uia_find_named(self, name: str, max_depth: int = 8):
+        """主窗口树内按 Name 精确找控件（确认弹窗的「确定」按钮等）。
+
+        与 :meth:`_uia_find_menu_item` 的差别：不限 ClassName，任何层级
+        Name 完全相等的第一个控件。找不到返回 None。
+        """
+        w = self._win
+        if w is None:
+            return None
+        found = [None]
+
+        def walk(c, d=0):
+            if found[0] is not None or d > max_depth:
+                return
+            try:
+                children = c.GetChildren()
+            except Exception:
+                return
+            for ch in children:
+                try:
+                    if (ch.Name or "") == name:
+                        found[0] = ch
+                        return
+                except Exception:
+                    pass
+                walk(ch, d + 1)
+
+        try:
+            walk(w)
+        except Exception:
+            return None
+        return found[0]
+
+    def _menu_click_tight(self, label: str, pos=None) -> bool:
+        """右键菜单里点 label 项：UIA 菜单项优先，全屏 OCR 兜底。
+
+        「移出群聊」这类菜单文字高度特异，OCR 命中要求包含 label 即可；
+        pos 是右键坐标，UIA 没命中时重开一次菜单再试一轮。任何一步
+        点不到都返回 False，绝不点别的东西。
+        """
+        item = self._uia_find_menu_item(label)
+        if item is not None and self._uia_click_menu_item(item):
+            return True
+        try:
+            from wechatauto.guia import ScreenOCR
+            import PIL.ImageGrab as IG
+        except Exception:
+            return False
+        for attempt in range(2):
+            if attempt > 0:
+                if not pos:
+                    return False
+                self._set_cursor(int(pos[0]), int(pos[1]))
+                rhythm.nap(0.2)
+                self._right_click()
+                rhythm.nap(1.0)
+            try:
+                res = ScreenOCR.recognize(IG.grab())
+            except Exception:
+                return False
+            for text, x, y, w, h in res:
+                t = (text or "").replace(" ", "")
+                if label in t:
+                    cx, cy = rhythm.point((x, y, x + w, y + h))
+                    self._set_cursor(cx, cy)
+                    rhythm.nap(0.2)
+                    self._left_click()
+                    rhythm.nap(0.5)
+                    return True
+        return False
+
+    def _confirm_kick_dialog(self) -> bool:
+        """点掉移出确认弹窗（「移出」/「确定」按钮），约 3 秒内没等到返回 False。
+
+        弹窗可能是独立顶层窗口（不在主窗口树里），UIA 找不到时用 OCR
+        兜底，且只点屏幕中部区域的命中（弹窗居中出现，聊天区同名文字
+        不会出现在那里），避免误点聊天内容里的普通文字。
+        """
+        try:
+            from wechatauto.guia import ScreenOCR
+            import PIL.ImageGrab as IG
+            ocr = True
+        except Exception:
+            ocr = False
+        for _ in range(3):
+            for label in ("移出", "确定"):
+                ctrl = self._uia_find_named(label)
+                if ctrl is not None and self._uia_click_menu_item(ctrl):
+                    rhythm.nap(0.5)
+                    return True
+            if ocr:
+                try:
+                    img = IG.grab()
+                    sw, sh = img.size
+                    res = ScreenOCR.recognize(img)
+                except Exception:
+                    res = []
+                for text, x, y, w, h in res:
+                    t = (text or "").replace(" ", "")
+                    if t not in ("移出", "确定", "确定移出"):
+                        continue
+                    if not (sw * 0.3 <= x + w / 2 <= sw * 0.7
+                            and sh * 0.25 <= y + h / 2 <= sh * 0.75):
+                        continue
+                    cx, cy = rhythm.point((x, y, x + w, y + h))
+                    self._set_cursor(cx, cy)
+                    rhythm.nap(0.2)
+                    self._left_click()
+                    rhythm.nap(0.5)
+                    return True
+            time.sleep(1.0)
+        return False
+
+    def kick_member(self, who: str, member: str, probe: str = "") -> bool:
+        """把 member 移出群聊（登录的号需是群主/群管理员）。
+
+        路径：按 probe（该成员近期发言正文）OCR 翻页定位 TA 的消息行
+        → 右键该行头像 → 菜单点「移出群聊」→ 点确认弹窗。每一步找不
+        到都立即放弃、滚回底部、返回 False（上层提示人工处理），绝不
+        盲点误伤别人。probe 为空或定位不到直接 False。
+        """
+        if not probe:
+            return False
+        if not self.ensure_window():
+            return False
+        if self.current_chat() != who and not self.open_chat(who):
+            return False
+        lst = self._message_list()
+        if lst is None:
+            return False
+        pt, scrolled = None, False
+        for page in range(6):
+            items = self._ocr_message_area(lst)
+            pt = self._locate_quote_point(items or [], probe) if items else None
+            if pt is not None:
+                break
+            if page >= 5 or not self._wheel_list(lst, 120, 5, settle=0.4):
+                break
+            scrolled = True
+        if pt is None:
+            if scrolled:
+                self._restore_chat_bottom()
+            return False
+        try:
+            ax = int(lst.BoundingRectangle.left + rhythm.spread(62, 80))
+        except Exception:
+            if scrolled:
+                self._restore_chat_bottom()
+            return False
+        ay = int(pt[1])
+        rhythm.gate('kick')
+        self._set_cursor(ax, ay)
+        rhythm.nap(0.2)
+        self._right_click()
+        rhythm.nap(1.0)
+        if not self._menu_click_tight("移出群聊", pos=(ax, ay)):
+            # 定位成功但菜单没出来：视图可能停在半路，滚回底部恢复现场
+            if scrolled:
+                self._restore_chat_bottom()
+            return False
+        return self._confirm_kick_dialog()
+
     # ------------------------------------------------------------------ 剪贴板粘贴
     def _set_text(self, ctrl, text: str) -> bool:
         """用 UIA ValuePattern 直接写文本：不动鼠标、不发按键，返回是否写成。
