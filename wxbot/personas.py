@@ -371,6 +371,54 @@ class PersonaEngine:
             log.warning("生成群闲聊接话失败: %s", e)
             return f"哈哈收到，刚才正潜水呢 [坏笑]"
 
+    def extract_recall_terms(self, question):
+        """跨聊天检索前的关键词抽取 → {"keywords", "who", "days"}。"""
+        system = (
+            "你是微信聊天记录检索器。把用户的自然问句解析成检索条件。"
+            '只输出 JSON：{"keywords": ["检索词", ...]（1~6个，去掉"谁/什么/怎么"这类'
+            '疑问词，保留具体事物、人名、地点、事件），'
+            '"who": "问句里点名要找的说话人昵称，没有则空串", '
+            '"days": 要回溯的天数(整数，问"今天"=1、"前几天"=7、没提=30)}。'
+        )
+        d = self.llm.chat_json(system, question, temperature=0.0)
+        kws = [str(k).strip() for k in (d.get("keywords") or []) if str(k).strip()]
+        try:
+            days = int(d.get("days") or 30)
+        except (TypeError, ValueError):
+            days = 30
+        return {"keywords": kws[:6], "who": str(d.get("who") or "").strip(),
+                "days": max(1, days)}
+
+    def chat_recall(self, question, lines):
+        """把检索到的聊天记录整合成带出处的口语化回答。"""
+        p = self.cfg.persona("通用朋友")
+        system = (
+            f"你是号主的私人微信助手，说话风格：{p.get('style') or '简洁口语化'}。"
+            "根据检索到的聊天记录回答号主的问题。"
+            "必须带出处：谁说的、在哪个群/私聊、大概什么时间（用前天/上周这类相对说法）；"
+            "口语化转述，别整段照抄；记录里没有的别编；"
+            "行文别罗列全部记录，挑最相关的整合成 2~4 句话。"
+        )
+        user = f"号主的问题：{question}\n\n检索到的记录：\n" + "\n".join(lines)
+        raw = self.llm.chat(system, user, temperature=0.3)
+        return _sanitize(raw)
+
+    def assign_themes(self, existing, pairs):
+        """把挖掘出的群问答聚类成主题 → {"items": [{"id", "theme"}]}。
+
+        pairs: [(qa_id, question), ...]；主题名优先复用 existing 里的旧名，
+        实在放不进再起新名（不超过 8 个字）。
+        """
+        system = (
+            "你是群聊问答知识库的主题整理器。把给出的问答问题聚类到主题。"
+            f"已有主题（能归入的优先复用）：{existing or '无'}。"
+            "实在不属于任何已有主题时才起新主题名（2~8个字，概括一类事）。"
+            '只输出 JSON：{"items": [{"id": 问题编号, "theme": "主题名"}, ...]}，'
+            "每一条都必须给出归类，不要遗漏。"
+        )
+        user = "待归类的问题：\n" + "\n".join(f"{i}: {q}" for i, q in pairs)
+        return self.llm.chat_json(system, user, temperature=0.1)
+
     def warn_message(self, persona_name, member, word, nth, threshold):
         """违禁词劝告话术。"""
         p = self.cfg.persona(persona_name)

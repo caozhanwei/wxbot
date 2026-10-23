@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS daily_stats(
     day TEXT, grp TEXT, msg_count INTEGER, active_members INTEGER,
     top_words TEXT, pending_count INTEGER, updated REAL,
     PRIMARY KEY(day, grp));
+CREATE TABLE IF NOT EXISTS mined_themes(
+    qa_id INTEGER PRIMARY KEY, theme TEXT, updated REAL);
 """
 
 
@@ -118,11 +120,22 @@ class Store:
                 "INSERT INTO mined(ts,grp,question,answer) VALUES(?,?,?,?)",
                 [(time.time(), grp, str(q)[:200], str(a)[:400]) for q, a in pairs])
 
-    def mined_pairs(self, grp=None, limit=50, offset=0):
-        q = ("SELECT * FROM mined" + (" WHERE grp=?" if grp else "")
-             + " ORDER BY id DESC LIMIT ? OFFSET ?")
+    def mined_pairs(self, grp=None, limit=50, offset=0, theme=None):
+        cond, args = [], []
+        if grp:
+            cond.append("m.grp=?")
+            args.append(grp)
+        if theme == "__none__":
+            cond.append("t.theme IS NULL")
+        elif theme:
+            cond.append("t.theme=?")
+            args.append(theme)
+        q = ("SELECT m.*, t.theme theme FROM mined m"
+             " LEFT JOIN mined_themes t ON t.qa_id=m.id"
+             + (" WHERE " + " AND ".join(cond) if cond else "")
+             + " ORDER BY m.id DESC LIMIT ? OFFSET ?")
         with self._conn() as c:
-            rows = c.execute(q, ((grp,) if grp else ()) + (limit, offset)).fetchall()
+            rows = c.execute(q, tuple(args) + (limit, offset)).fetchall()
             out = []
             for r in rows:
                 d = dict(r)
@@ -131,10 +144,44 @@ class Store:
                 out.append(d)
             return out
 
-    def mined_count(self, grp=None):
-        q = "SELECT COUNT(*) n FROM mined" + (" WHERE grp=?" if grp else "")
+    def mined_count(self, grp=None, theme=None):
+        cond, args = [], []
+        if grp:
+            cond.append("m.grp=?")
+            args.append(grp)
+        if theme == "__none__":
+            cond.append("t.theme IS NULL")
+        elif theme:
+            cond.append("t.theme=?")
+            args.append(theme)
+        q = ("SELECT COUNT(*) n FROM mined m"
+             " LEFT JOIN mined_themes t ON t.qa_id=m.id"
+             + (" WHERE " + " AND ".join(cond) if cond else ""))
         with self._conn() as c:
-            return c.execute(q, ((grp,) if grp else ())).fetchone()["n"]
+            return c.execute(q, tuple(args)).fetchone()["n"]
+
+    def set_theme(self, qa_id, theme):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO mined_themes(qa_id,theme,updated) VALUES(?,?,?) "
+                "ON CONFLICT(qa_id) DO UPDATE SET theme=excluded.theme, "
+                "updated=excluded.updated",
+                (int(qa_id), str(theme)[:60], time.time()))
+
+    def themes_list(self, grp=None):
+        q = ("SELECT t.theme theme, COUNT(*) n FROM mined_themes t"
+             " JOIN mined m ON m.id=t.qa_id"
+             + (" WHERE m.grp=?" if grp else "")
+             + " GROUP BY t.theme ORDER BY n DESC, t.theme")
+        with self._conn() as c:
+            return [dict(r) for r in
+                    c.execute(q, ((grp,) if grp else ())).fetchall()]
+
+    def mined_unthemed(self, grp, limit=20):
+        q = ("SELECT m.* FROM mined m LEFT JOIN mined_themes t ON t.qa_id=m.id"
+             " WHERE t.qa_id IS NULL AND m.grp=? ORDER BY m.id LIMIT ?")
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(q, (grp, limit)).fetchall()]
 
     def get_mined_seq(self, chat):
         with self._conn() as c:

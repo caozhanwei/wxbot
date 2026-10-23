@@ -106,6 +106,9 @@ def _do_mine(bot, gid, gname, full, auto):
         store.add_mined(gid, fresh)
     store.set_mined_seq(gid, texts[-1]["seq"])
     log.info("挖掘 %s：%d 条消息 → %d 对新问答", gname, len(texts), len(fresh))
+    if fresh:
+        from . import themes
+        themes.assign_async(bot, gid)
 
 
 def _fetch_history(driver, gid, since_seq):

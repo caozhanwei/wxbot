@@ -740,6 +740,10 @@ details summary:hover{color:var(--primary)}
     </form>
     {% endfor %}
     <div style="margin-left:auto;display:flex;gap:8px">
+      <form method="post" action="/themes/assign">
+        <input type="hidden" name="grp" value="{{ m_grp }}">
+        <button class="btn" title="把未归簇的问答对交给 AI 聚类成主题（挖掘完成后也会自动跑）">整理主题</button>
+      </form>
       <form method="post" action="/kb/push_mined">
         <input type="hidden" name="grp" value="{{ m_grp }}">
         <button class="btn btn-primary" title="把本地挖掘的问答对批量写入团队知识库（kb_add_qa 同问自动去重，可重复点按）">同步问答入库</button>
@@ -757,18 +761,28 @@ details summary:hover{color:var(--primary)}
     {% endfor %}
   </div>
 
+  <div class="chip-group">
+    <span class="muted" style="font-size:12px;margin-right:4px">主题：</span>
+    <a href="{{ m_theme_all_link.href }}" class="chip {{ 'active' if m_theme_all_link.active }} {{ 'on' if m_theme_all_link.active }}">{{ m_theme_all_link.name }}</a>
+    {% for l in m_theme_links %}
+    <a href="{{ l.href }}" class="chip {{ 'active' if l.active }} {{ 'on' if l.active }}">{{ l.name }}</a>
+    {% endfor %}
+    <a href="{{ m_theme_none_link.href }}" class="chip {{ 'active' if m_theme_none_link.active }} {{ 'on' if m_theme_none_link.active }}">{{ m_theme_none_link.name }}</a>
+  </div>
+
   <div class="table-responsive">
     <table>
-      <thead><tr><th style="width:20%">来源群</th><th style="width:35%">提炼问题</th><th>总结回答</th></tr></thead>
+      <thead><tr><th style="width:18%">来源群</th><th style="width:30%">提炼问题</th><th style="width:12%">主题</th><th>总结回答</th></tr></thead>
       <tbody>
       {% for r in mined %}
       <tr>
         <td><b>{{ r.grp_name or r.grp }}</b></td>
         <td style="font-weight:600;color:var(--text-main)">{{ r.question }}</td>
+        <td>{% if r.theme %}<span class="chip on" style="cursor:default">{{ r.theme }}</span>{% else %}<span class="muted">未归簇</span>{% endif %}</td>
         <td style="color:var(--text-sub);line-height:1.6">{{ r.answer }}</td>
       </tr>
       {% endfor %}
-      {% if not mined %}<tr><td colspan="3" class="muted" style="text-align:center;padding:16px">还没有挖掘记录</td></tr>{% endif %}
+      {% if not mined %}<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">还没有挖掘记录</td></tr>{% endif %}
       </tbody>
     </table>
   </div>
@@ -1018,7 +1032,8 @@ def start_web(bot):
             log.warning("会话搜索失败: %s", e)
             return []
 
-    def _render(form_error="", candidates=(), p_grp="", p_page=1, m_grp="", m_page=1):
+    def _render(form_error="", candidates=(), p_grp="", p_page=1, m_grp="",
+                m_page=1, m_theme=""):
         cfg = bot.cfg
         snap = cfg.snapshot()
         logs = bot.store.recent_logs(30)
@@ -1069,7 +1084,8 @@ def start_web(bot):
             return min(max(1, page), pages), pages
 
         def _href(**over):
-            q = {"p_grp": p_grp, "p_page": p_page, "m_grp": m_grp, "m_page": m_page}
+            q = {"p_grp": p_grp, "p_page": p_page, "m_grp": m_grp,
+                 "m_page": m_page, "m_theme": m_theme}
             q.update(over)
             return "/?" + "&".join(f"{k}={v}" for k, v in q.items() if v not in ("", 1))
 
@@ -1084,8 +1100,10 @@ def start_web(bot):
             return links
 
         p_grp, m_grp = str(p_grp or ""), str(m_grp or "")
+        m_theme = str(m_theme or "")
         p_page, p_pages = _paged(bot.store.profiles_count(p_grp or None), _int(p_page))
-        m_page, m_pages = _paged(bot.store.mined_count(m_grp or None), _int(m_page))
+        m_page, m_pages = _paged(
+            bot.store.mined_count(m_grp or None, m_theme or None), _int(m_page))
         try:
             profs = bot.store.profiles(p_grp or None, limit=_PAGE_SIZE,
                                        offset=(p_page - 1) * _PAGE_SIZE)
@@ -1097,9 +1115,14 @@ def start_web(bot):
             p["updated_t"] = time.strftime("%m-%d %H:%M",
                                            time.localtime(p.get("updated") or 0))
         mined = bot.store.mined_pairs(m_grp or None, limit=_PAGE_SIZE,
-                                      offset=(m_page - 1) * _PAGE_SIZE)
+                                      offset=(m_page - 1) * _PAGE_SIZE,
+                                      theme=m_theme or None)
         for r in mined:
             r["grp_name"] = grp_names.get(r.get("grp")) or r.get("grp") or ""
+        try:
+            m_themes = bot.store.themes_list(m_grp or None)
+        except Exception:
+            m_themes = []
         # 驾驶舱：今日每群统计 + 日报水位 + 主动动作审计
         day_today = time.strftime("%Y-%m-%d")
         stats_by_grp = {r.get("grp"): r for r in bot.store.daily_stats_list(day_today)}
@@ -1147,7 +1170,15 @@ def start_web(bot):
             bootstrap_status=bootstrap.status(),
             mine_status=mining.status(), mined=mined, mined_count=bot.store.mined_count(),
             m_group_links=_group_links(m_grp, "m"), m_page_no=m_page, m_pages_n=m_pages,
-            m_total=bot.store.mined_count(m_grp or None),
+            m_total=bot.store.mined_count(m_grp or None, m_theme or None),
+            m_theme=m_theme, m_theme_links=[
+                {"name": f"{t['theme']}({t['n']})", "active": t["theme"] == m_theme,
+                 "href": _href(m_theme=t["theme"], m_page=1)}
+                for t in m_themes],
+            m_theme_none_link={"name": "未归簇", "active": m_theme == "__none__",
+                               "href": _href(m_theme="__none__", m_page=1)},
+            m_theme_all_link={"name": "全部主题", "active": not m_theme,
+                              "href": _href(m_theme="", m_page=1)},
             m_prev=(_href(m_page=m_page - 1) if m_page > 1 else ""),
             m_next=(_href(m_page=m_page + 1) if m_page < m_pages else ""),
             member_profiles=profs, profile_status=profiles_mod.status(),
@@ -1169,7 +1200,8 @@ def start_web(bot):
         page = _render(p_grp=request.args.get("p_grp", ""),
                        p_page=request.args.get("p_page", 1),
                        m_grp=request.args.get("m_grp", ""),
-                       m_page=request.args.get("m_page", 1))
+                       m_page=request.args.get("m_page", 1),
+                       m_theme=request.args.get("m_theme", ""))
         _flash["msg"] = ""
         return page
 
@@ -1550,6 +1582,30 @@ def start_web(bot):
     def mine_export():
         path = mining.export_markdown(bot.store)
         _flash["msg"] = f"已导出：{path}" if path else "还没有可导出的问答"
+        return redirect("/")
+
+    @app.post("/themes/assign")
+    def themes_assign():
+        """把未归簇的挖掘问答交给 LLM 聚类成主题（单群或全部配置群）。"""
+        from . import themes as themes_mod
+        if not getattr(bot, "personas", None):
+            return _render(form_error="LLM 未就绪，无法整理主题")
+        grp = (request.form.get("grp") or "").strip()
+        if grp:
+            grps = [grp]
+        else:
+            grps = [g.get("id") for g in (bot.cfg.data.get("groups") or [])
+                    if g.get("enabled") and g.get("id")]
+        total, done = 0, 0
+        for gid in grps:
+            for _ in range(5):                       # 每群最多 5 批（100 条）
+                n = themes_mod.assign(bot, gid)
+                total += n
+                done += 1
+                if n == 0:
+                    break
+        _flash["msg"] = (f"主题整理完成：新归簇 {total} 条" if total
+                         else "没有需要归簇的问答（或 LLM 暂不可用）")
         return redirect("/")
 
     @app.post("/profiles/refresh")

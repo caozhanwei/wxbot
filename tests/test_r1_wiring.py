@@ -131,7 +131,7 @@ def _at(content, sender="wxid_a", name="阿强", ts=None, at=True):
 def test_superseded_at_recorded(tmp_path):
     b = _mk_bot(tmp_path)
     b.build_watch()
-    w = b.watch[-1]                      # 测试群
+    w = [x for x in b.watch if x["kind"] == "group"][0]
     b._group_qa = lambda gw, m: None     # 假装已作答最新一条
     old = _at("@智能机器人 老问题", ts=time.time() - 600)
     new = _at("@智能机器人 新问题")
@@ -143,7 +143,7 @@ def test_superseded_at_recorded(tmp_path):
 def test_all_stale_at_recorded(tmp_path):
     b = _mk_bot(tmp_path)
     b.build_watch()
-    w = b.watch[-1]
+    w = [x for x in b.watch if x["kind"] == "group"][0]
     stale1 = _at("@智能机器人 昨天的问题", ts=time.time() - 3600)
     stale2 = _at("@智能机器人 更早的问题", ts=time.time() - 7200)
     b._on_group_msgs(w, [stale1, stale2])
@@ -154,7 +154,7 @@ def test_all_stale_at_recorded(tmp_path):
 def test_paused_at_recorded(tmp_path):
     b = _mk_bot(tmp_path)
     b.build_watch()
-    w = b.watch[-1]
+    w = [x for x in b.watch if x["kind"] == "group"][0]
     b.state["paused"] = True
     b._on_group_msgs(w, [_at("@智能机器人 暂停期间的问题")])
     rows = b.store.missed_unconsumed(src="at")

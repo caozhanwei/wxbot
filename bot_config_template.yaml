@@ -22,6 +22,8 @@ app:
     per_chat_daily_max: 30       # 每个会话每天最多几条（0=不限）
     window: [8, 22]              # 允许主动发送的时段（小时，含头不含尾）；急件豁免时段窗
                                  # 急停用管理员命令：#急停主动 / #恢复主动
+  console:                       # 主人对话台：在"文件传输助手"里发消息=直接问助手（跨群/私聊记录检索问答）
+    enabled: true                # 设 false 关闭；# 开头仍走管理员命令；对话台回复不受闸门/暂停限制
 llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
   base_url: https://your-llm-gateway.example/v1
@@ -102,6 +104,7 @@ groups:
     enabled: true
     grounded_reply: true
     llm_fallback: false
+    local_first: true             # 群精华主题库先撞：该群沉淀过的问答直接转述作答（标"群内沉淀"），不查知识库；设 false 关闭
   manage:
     welcome: true
     welcome_text: 欢迎 {name} 入群！有问题可以直接 @我 提问～

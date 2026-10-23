@@ -145,6 +145,12 @@ class Bot:
                                    "kind": "contact_passive", "cfg": {},
                                    "since": old.get(uid)})
                 known.add(uid)
+        # 主人对话台：文件传输助手（主人自己的消息=对助手说话），默认开
+        console = self.cfg.app.get("console")
+        if not (isinstance(console, dict) and console.get("enabled") is False):
+            uid = "filehelper"
+            self.watch.append({"user": uid, "display": "文件传输助手",
+                               "kind": "console", "cfg": {}, "since": old.get(uid)})
         for w in self.watch:
             if w["since"] is None:
                 w["since"] = self.driver.baseline(w["user"])
@@ -249,6 +255,8 @@ class Bot:
                     self._on_contact_msgs(w, msgs)
                 elif w["kind"] == "contact_passive":
                     self._on_passive_msgs(w, msgs)
+                elif w["kind"] == "console":
+                    self._on_console_msgs(w, msgs)
                 else:
                     self._on_group_msgs(w, msgs)
             self._maybe_auto_mine()
@@ -293,6 +301,36 @@ class Bot:
                 digest.on_private_msg(self, w, m)
             except Exception as e:
                 log.warning("被动私聊入库失败(%s): %s", w["display"], e)
+
+    def _on_console_msgs(self, w, msgs):
+        """主人对话台（文件传输助手）：is_self 文本=主人对助手说话。
+
+        直接应答主人的提问，不过闸门、暂停时也可用；# 命令直通管理指令。
+        """
+        from . import recall
+        for m in msgs:
+            if not m.get("is_self") or m.get("type") != "文本":
+                continue
+            text = str(m.get("content") or "").strip()
+            if not text or text.startswith("<"):
+                continue
+            # 自己刚发的（recall 回复/日报推送）不当成主人提问
+            last_t, last_time = self._last_sent_cache.get(w["display"], ("", 0.0))
+            if text == last_t and time.time() - last_time < 120:
+                continue
+            if text.startswith("#"):
+                cmd = text.lstrip("#").split()
+                self.send(w["display"],
+                          self._do_admin(cmd[0] if cmd else "", cmd[1:]), "admin")
+                continue
+            log.info("主人提问: %s", text[:60])
+            try:
+                ans = recall.answer(self, text)
+            except Exception as e:
+                log.warning("对话台问答失败: %s", e)
+                ans = "这会儿没查明白，换个说法再问一次？"
+            if ans:
+                self.send(w["display"], ans, "recall")
 
     def _reply_contact(self, w, texts):
         from . import personas
@@ -464,6 +502,25 @@ class Bot:
                 w["user"], getattr(self.driver, "self_id", "")) or {}).get("profile") or ""
         except Exception:
             self_profile = ""
+        # 本地主题库先撞：该群沉淀过的问答直接转述作答，不查 KB（qa.local_first 可关）
+        if qa.get("local_first", True):
+            mined = self._local_qa_hit(w, question)
+            if mined:
+                mq, ma = mined
+                log.info("主题库命中 %s: %s", w["display"], mq[:40])
+                try:
+                    reply = self.personas.group_answer(
+                        g.get("persona", "通用朋友"), w["display"], [], question, asker,
+                        profile=profile, self_profile=self_profile,
+                        kb_ref=f"群里沉淀过的问题：{mq}\n当时的结论：{ma}",
+                        avoid_lines=self._recent_replies(w["display"]), max_chars=maxc)
+                except Exception as e:
+                    log.warning("主题库转述失败(%s)，直出沉淀答案: %s", w["display"], e)
+                    reply = ""
+                reply = _limit_reply(w["cfg"], reply or f"群里之前聊过：{ma}")
+                self.send_quote(w["display"], reply + "（群内沉淀）",
+                                target_name=asker, target_content=raw_msg_content)
+                return
         standalone, should = question, True
         # 提速①：KB 预取与提问理解并行（问题多数已独立，二者通常等价）
         kb_box = queue.Queue()
@@ -552,6 +609,16 @@ class Bot:
             self.send_quote(w["display"], _limit_reply(w["cfg"], reply),
                             target_name=asker, target_content=raw_msg_content)
             self.notify_admins(f"[待沉淀] {w['display']} {asker}: {standalone[:80]}")
+
+    def _local_qa_hit(self, w, question):
+        """群精华主题库本地命中：与该群已沉淀问答共享字符二元组达阈值。"""
+        from . import themes
+        try:
+            pairs = self.store.mined_pairs(w["user"])
+        except Exception as e:
+            log.warning("读主题库失败(%s): %s", w["display"], e)
+            return None
+        return themes.local_hit(pairs, question)
 
     def _recent_replies(self, display, limit=6):
         """本会话近期机器人已发出的文本（最新在前），供多样性判定与 prompt 注入。"""
