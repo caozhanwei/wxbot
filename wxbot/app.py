@@ -65,6 +65,7 @@ class BotShell:
             log.error("Bot 启动失败: %s", e)
             self.startup_error = f"{type(e).__name__}: {e}"
             self._bot = None
+            _schedule_restart(self, delay=60)
             return
         self._bot = bot
         try:
@@ -73,6 +74,20 @@ class BotShell:
             log.exception("Bot 运行异常退出")
             self.startup_error = f"运行异常退出: {e}"
             self._bot = None
+            _schedule_restart(self, delay=30)
+
+
+def _schedule_restart(shell, delay=30, timer_factory=None):
+    """崩溃自愈：app.watchdog.bot_restart（默认开）关掉则不排程。"""
+    wd_cfg = ((shell.cfg.data.get("app") or {}).get("watchdog") or {})
+    if not wd_cfg.get("bot_restart", True):
+        return
+    t = (timer_factory or threading.Timer)(delay, shell.restart)
+    try:
+        t.daemon = True
+    except AttributeError:
+        pass                              # 测试替身（tuple 等）没有 daemon
+    t.start() if hasattr(t, "start") else None
 
 
 def _keepalive():

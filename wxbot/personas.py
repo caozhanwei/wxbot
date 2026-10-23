@@ -3,6 +3,7 @@
 import logging
 import random
 import re
+import time
 
 from llm import LLM, LLMError
 
@@ -448,6 +449,21 @@ class PersonaEngine:
         user = f"好友：{who}\n关于这位好友的记忆：{memory or '（暂无，泛泛问候但别太空洞）'}"
         raw = self.llm.chat(system, user, temperature=0.8)
         return _sanitize(raw)
+
+    def route_intent(self, text, intents_doc=None, base_date=""):
+        """一句话操控意图路由 → {"intent", who/what/date/time/query/target?}。"""
+        import json as _json
+        doc = _json.dumps(intents_doc or {}, ensure_ascii=False, indent=0)
+        system = (
+            "你是微信助手的一句话指令路由器。把用户的话映射到意图白名单之一并抽取参数；"
+            "普通提问、闲聊、寻求答疑的一律 none，绝不含糊映射。"
+            f"今天的日期是 {base_date or time.strftime('%Y-%m-%d')}，"
+            "相对时间（明天/周五/后天）换算成绝对日期。"
+            "只输出 JSON：{\"intent\": \"...\", \"who\": \"\", \"what\": \"\", "
+            "\"date\": \"YYYY-MM-DD\", \"time\": \"HH:MM\", \"query\": \"\", \"target\": \"\"}。"
+            f"意图白名单：\n{doc}"
+        )
+        return self.llm.chat_json(system, text, temperature=0.0)
 
     def warn_message(self, persona_name, member, word, nth, threshold):
         """违禁词劝告话术。"""

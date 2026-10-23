@@ -22,7 +22,7 @@ _PAGE_SIZE = 20   # 画像/问答库浏览页大小
 _NAV = [("仪表盘", "#top"), ("最近会话", "#recent"), ("私聊联系人", "#contacts"),
         ("人设库", "#personas"), ("群管理与答疑", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
         ("运行日志", "#logs"), ("待沉淀问题", "#pending"), ("约定提醒", "#reminders"),
-        ("群历史挖掘", "#mine"),
+        ("自愈守护", "#watchdog"), ("群历史挖掘", "#mine"),
         ("群友画像", "#profiles"), ("高级 YAML", "#yaml"), ("关于", "#about")]
 
 _PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -704,6 +704,27 @@ details summary:hover{color:var(--primary)}
   </div>
 </div>
 
+<!-- 自愈守护 -->
+<a name="watchdog"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">自愈守护</div>
+    <span class="card-subtitle">微信进程监测告警（可配自动拉起）· 连续读消息失败掉线告警 · bot 崩溃 30 秒自动重启 · 开机自启</span>
+  </div>
+  <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:13px">
+    <span>微信进程：{% if wd_wechat_alive %}<b style="color:#16a34a">运行中</b>{% else %}<b style="color:#dc2626">未检测到</b>{% endif %}</span>
+    <span class="muted">进程拉起：{{ '开' if wd_restart_wechat else '关（只告警）' }}</span>
+    <span class="muted">崩溃自愈：{{ '开' if wd_bot_restart else '关' }}</span>
+    <form method="post" action="/watchdog/autostart" style="margin:0">
+      {% if wd_autostart %}
+      <input type="hidden" name="on" value="0"><button class="btn btn-sm">关闭开机自启</button>
+      {% else %}
+      <input type="hidden" name="on" value="1"><button class="btn btn-sm btn-primary">开启开机自启</button>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
 <!-- 群定时任务 -->
 <a name="tasks"></a>
 <div class="card">
@@ -1173,6 +1194,16 @@ def start_web(bot):
         gate_logs = [l for l in logs if l.get("kind") == "gate"]
         _gate = getattr(bot, "gate", None)
         gate_stopped = bool(_gate and getattr(_gate, "stopped", False))
+        from . import watchdog as _wd
+        try:
+            wd_alive = _wd.wechat_alive(_wd._tasklist("Weixin.exe"))
+        except Exception:
+            wd_alive = False
+        _wdcfg = (snap.get("app") or {}).get("watchdog") or {}
+        try:
+            wd_auto = _wd.autostart_enabled()
+        except Exception:
+            wd_auto = False
         return render_template_string(
             _PAGE, nav=_NAV,
             self_name=(driver.self_name if driver else "未连接"),
@@ -1221,6 +1252,9 @@ def start_web(bot):
             p_next=(_href(p_page=p_page + 1) if p_page < p_pages else ""),
             app_version=updater.current_version(),
             dash=dash, gate_logs=gate_logs, gate_stopped=gate_stopped,
+            wd_wechat_alive=wd_alive, wd_autostart=wd_auto,
+            wd_restart_wechat=bool(_wdcfg.get("restart_wechat")),
+            wd_bot_restart=bool(_wdcfg.get("bot_restart", True)),
             digest_cfg=((snap.get("app") or {}).get("daily_digest") or {}),
             update_mirror=(str((snap.get("app") or {}).get("update_mirror") or "").strip()
                            or updater.DEFAULT_MIRROR),
@@ -1649,6 +1683,17 @@ def start_web(bot):
         except (TypeError, ValueError):
             return _render(form_error="参数错误")
         _flash["msg"] = reminders_mod.cmd_done(bot, [str(rid)])
+        return redirect("/")
+
+    @app.post("/watchdog/autostart")
+    def watchdog_autostart():
+        from . import watchdog as wd_mod
+        on = (request.form.get("on") == "1")
+        try:
+            wd_mod.set_startup(on)
+        except OSError as e:
+            return _render(form_error=f"设置开机自启失败: {e}")
+        _flash["msg"] = "已开启开机自启（当前用户）" if on else "已关闭开机自启"
         return redirect("/")
 
     @app.post("/profiles/refresh")

@@ -30,6 +30,9 @@ app:
     hour: 10                     # 每天几点挑人发（配合闸门 8~22 点时段窗）
     days_min: 7                  # 超过 N 天没聊过才算"好久没聊"
     max_per_day: 3               # 每天最多关怀几人；每人每周最多 1 次（内置）
+  watchdog:                      # 自愈守护：微信进程监测告警 + 掉线告警 + bot 崩溃自动重启
+    restart_wechat: false        # 微信进程不在时自动拉起（默认只告警管理员，避免误拉旧版/多开）
+    bot_restart: true            # bot 异常退出后 30~60 秒自动重启（开机自启在网页「自愈守护」卡片开）
 llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
   base_url: https://your-llm-gateway.example/v1

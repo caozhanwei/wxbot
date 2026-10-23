@@ -226,6 +226,7 @@ class Bot:
         from . import care as _care
         from . import digest as _digest
         from . import reminders as _reminders
+        from . import watchdog as _watchdog
         from .scheduler import DailyJob, Scheduler
         dd = self.cfg.app.get("daily_digest") or {}
         cc = self.cfg.app.get("care") or {}
@@ -253,7 +254,9 @@ class Bot:
                     msgs, w["since"] = self.driver.poll(w["user"], w["since"])
                 except Exception as e:
                     log.warning("poll %s 失败: %s", w["display"], e)
+                    self.state["poll_fails"] = (self.state.get("poll_fails") or 0) + 1
                     continue
+                self.state["poll_fails"] = 0
                 if not msgs:
                     continue
                 if w["kind"] == "contact":
@@ -268,6 +271,7 @@ class Bot:
             self._maybe_run_tasks()
             _reminders.maybe_extract(self)
             _reminders.maybe_fire(self)
+            _watchdog.maybe_check(self)
             time.sleep(float(rc.get("poll_sec", POLL_SEC_DEFAULT)))
 
     def _maybe_auto_mine(self):
@@ -329,6 +333,11 @@ class Bot:
                 cmd = text.lstrip("#").split()
                 self.send(w["display"],
                           self._do_admin(cmd[0] if cmd else "", cmd[1:]), "admin")
+                continue
+            from . import command
+            out = command.handle(self, text)
+            if out is not None:
+                self.send(w["display"], out, "cmd")
                 continue
             log.info("主人提问: %s", text[:60])
             try:
@@ -530,6 +539,11 @@ class Bot:
                 return
         except Exception as e:
             log.warning("任务指令处理异常(%s): %s", w["display"], e)
+        try:
+            if self._maybe_command(w, m, question):
+                return
+        except Exception as e:
+            log.warning("一句话操控处理异常(%s): %s", w["display"], e)
         rc = self.cfg.reply_cfg
         try:
             profile = (self.store.get_profile(w["user"], m["sender"]) or {}).get("profile") or ""
@@ -706,6 +720,22 @@ class Bot:
             if len(a) >= 2 and a in display:   # 群名片常带前后缀，按包含匹配
                 return True
         return False
+
+    def _maybe_command(self, w, m, question):
+        """群管理员 @机器人 的一句话操控（暂停/补报/建提醒/查记录/开关群）。
+
+        命中并处理返回 True（调用方不再走答疑）；非管理员/不是指令返回 False。
+        """
+        from . import command
+        if not self._is_task_admin(w, m):
+            return False
+        out = command.handle(self, question)
+        if out is None:
+            return False
+        self.send_quote(w["display"], out,
+                        target_name=m.get("sender_display") or m.get("sender") or "",
+                        target_content=m.get("content") or "", kind="cmd")
+        return True
 
     def _maybe_task_command(self, w, m, question=None):
         """群主/管理员的 @消息若是定时任务指令则处理并返回 True，否则返回 False 走原答疑。"""
@@ -987,7 +1017,7 @@ class Bot:
                     break
             if hit:
                 self.build_watch()
-                return f"已{'' if name=='开' else '停用'} {target}"
+                return f"已{'启用' if name == '开' else '停用'} {target}"
             return f"没找到 {target}"
         if name == "重载":
             self.cfg.reload()

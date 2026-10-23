@@ -435,3 +435,19 @@ def test_reminders_card_and_done(client):
     rid = bot.store.list_reminders()[0]["id"]
     c.post("/reminders/done", data={"id": str(rid)}, follow_redirects=True)
     assert bot.store.list_reminders(status="pending") == []
+
+
+def test_watchdog_card_and_autostart_toggle(client, monkeypatch):
+    from wxbot import watchdog as wd_mod
+    c, bot, path = client
+    state = {"on": False}
+    monkeypatch.setattr(wd_mod, "set_startup",
+                        lambda on, **kw: state.__setitem__("on", on))
+    monkeypatch.setattr(wd_mod, "autostart_enabled", lambda **kw: state["on"])
+    monkeypatch.setattr(wd_mod, "_tasklist", lambda name: '"Weixin.exe","9"')
+    body = c.get("/").data.decode("utf-8")
+    assert "自愈守护" in body and "运行中" in body and "开启开机自启" in body
+    c.post("/watchdog/autostart", data={"on": "1"}, follow_redirects=True)
+    assert state["on"] is True
+    body = c.get("/").data.decode("utf-8")
+    assert "关闭开机自启" in body
