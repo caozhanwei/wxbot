@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS remind_seq(
 CREATE TABLE IF NOT EXISTS care_log(
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, wxid TEXT,
     name TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS complaints(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, src TEXT,
+    chat TEXT, sender TEXT, sender_display TEXT, content TEXT,
+    marks TEXT, digested INTEGER DEFAULT 0);
 """
 
 
@@ -397,6 +401,32 @@ class Store:
         marks = ",".join("?" * len(ids))
         with self._lock, self._conn() as c:
             c.execute(f"UPDATE missed_cache SET digested=1 WHERE id IN ({marks})", ids)
+
+    # ---------- 吐槽收集（每日复盘给优化建议） ----------
+
+    def add_complaint(self, src, chat, sender, sender_display, content,
+                      marks="", ts=None):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO complaints(ts,src,chat,sender,sender_display,"
+                "content,marks,digested) VALUES(?,?,?,?,?,?,?,0)",
+                (time.time() if ts is None else ts, src, chat, sender,
+                 sender_display or "", str(content)[:500], str(marks)[:100]))
+
+    def complaints_unconsumed(self, since=None, limit=300):
+        q = ("SELECT * FROM complaints WHERE digested=0"
+             + (" AND ts>=?" if since else "") + " ORDER BY id LIMIT ?")
+        with self._conn() as c:
+            rows = c.execute(q, ((since,) if since else ()) + (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_complaints_consumed(self, ids):
+        ids = [int(i) for i in (ids or []) if int(i) > 0]
+        if not ids:
+            return
+        marks = ",".join("?" * len(ids))
+        with self._lock, self._conn() as c:
+            c.execute(f"UPDATE complaints SET digested=1 WHERE id IN ({marks})", ids)
 
     def digest_done(self, grp, day, last_seq=0):
         with self._lock, self._conn() as c:

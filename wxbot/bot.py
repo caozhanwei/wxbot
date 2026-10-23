@@ -231,11 +231,14 @@ class Bot:
         dd = self.cfg.app.get("daily_digest") or {}
         cc = self.cfg.app.get("care") or {}
         wk = self.cfg.app.get("weekly_report") or {}
+        cr = self.cfg.app.get("complaint_review") or {}
         self._scheduler = Scheduler(self, [
             DailyJob("digest", int(dd.get("hour") or 21), fn=_digest.run_digest),
             DailyJob("care", int(cc.get("hour") or 10), fn=_care.run_care),
             DailyJob("weekly", int(wk.get("hour") or 9), minute=30,
-                     fn=_digest.run_weekly)])
+                     fn=_digest.run_weekly),
+            DailyJob("complaints", int(cr.get("hour") or 21), minute=45,
+                     fn=_digest.run_complaint_review)])
         self._scheduler.start()
         while True:
             if self.cfg.maybe_reload():
@@ -332,6 +335,8 @@ class Bot:
             last_t, last_time = self._last_sent_cache.get(w["display"], ("", 0.0))
             if text == last_t and time.time() - last_time < 120:
                 continue
+            # 主人对机器人的吐槽也收进每日复盘（最有价值的改进线索）
+            self._track_complaint(w, m, (), src="console")
             if text.startswith("#"):
                 cmd = text.lstrip("#").split()
                 self.send(w["display"],
@@ -360,6 +365,8 @@ class Bot:
             if (not m["is_self"] and m["type"] == "文本"
                     and not m["content"].startswith("<?xml")):
                 texts.append(m)
+        for m in texts:
+            self._track_complaint(w, m, src="private")
         last = texts[-1]["content"]
         log.info("私聊 %s: %s", w["display"], last[:60])
         try:
@@ -480,6 +487,7 @@ class Bot:
                 continue
             self._track_flood(w, m)
             self._track_ads(w, m)
+            self._track_complaint(w, m, names)
             word = None
             if mg.get("forbidden_words"):
                 word = group_logic.forbidden_hit(m["content"], mg["forbidden_words"])
@@ -545,6 +553,24 @@ class Bot:
         self.notify_admins(
             f"[广告嫌疑] {w['display']} 新成员「{who}」：{(m['content'] or '')[:60]}\n"
             f"特征：{'、'.join(marks[:5])}。确认违规可发：#踢 {who}")
+
+    def _track_complaint(self, w, m, names=(), src="group"):
+        """收集对机器人的吐槽（每日 LLM 复盘给优化建议）；只入库不即时打扰。"""
+        try:
+            quoted_bot = bool(m.get("is_quote") and m.get("quoted_user")
+                              and m.get("quoted_user") in (list(names)
+                              + [getattr(self.driver, "self_name", "") or ""]))
+            hits = group_logic.complaint_hits(
+                m.get("content") or "", bot_names=names,
+                quoted_bot=quoted_bot, private=(src != "group"))
+            if hits:
+                self.store.add_complaint(
+                    src, w["display"], m.get("sender") or "",
+                    m.get("sender_display") or "",
+                    m.get("content") or "", marks="、".join(hits[:4]),
+                    ts=m.get("ts"))
+        except Exception as e:
+            log.debug("吐槽收集失败(%s): %s", w["display"], e)
 
     def _welcome(self, w, name):
         text = ((w["cfg"].get("manage") or {}).get("welcome_text")
@@ -1030,7 +1056,7 @@ class Bot:
 
     def _do_admin(self, name, args):
         if name in ("帮助", "help", ""):
-            return ("命令：#状态 #暂停 #恢复 #补报 #急停主动 #恢复主动 "
+            return ("命令：#状态 #暂停 #恢复 #补报 #吐槽 #急停主动 #恢复主动 "
                     "#开 <名> #关 <名> #重载 #待审 #提醒 #销项 #催办 #已解 "
                     "#踢 <昵称> [群名] #确认踢 #取消踢\n"
                     "（联系人/群名单与开关在 bot_config.yaml 或网页配置）")
@@ -1044,6 +1070,9 @@ class Bot:
         if name == "补报":
             from . import digest
             return digest.report_missed_now(self)
+        if name == "吐槽":
+            from . import digest
+            return digest.report_complaints_now(self)
         if name == "急停主动" or (name == "急停" and args[:1] == ["主动"]):
             self.gate.stop()
             return "已急停全部主动动作（急件/日报推送都停），#恢复主动 解除"

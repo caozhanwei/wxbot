@@ -304,3 +304,68 @@ def report_missed_now(bot):
             for chat, rs in list(by_chat.items())[:8]))
     out.append(f"共 {len(rows)} 条（晚上日报会自动汇总消化）")
     return "\n\n".join(out)
+
+
+# ---------- 吐槽收集与每日复盘 ----------
+
+def _complaint_cfg(bot):
+    return (bot.cfg.data.get("app") or {}).get("complaint_review") or {}
+
+
+def run_complaint_review(bot):
+    """每日吐槽复盘：LLM 分析近 24h 对机器人的吐槽，归纳共性 + 给优化建议。
+
+    app.complaint_review{enabled,hour=21,push_to}；LLM 挂了降级高频词
+    简版；推送成功才消化缓存（失败留待下次）。
+    """
+    cfg = _complaint_cfg(bot)
+    if not cfg.get("enabled"):
+        return
+    push_to = str(cfg.get("push_to") or "").strip() or _push_target(bot)
+    rows = bot.store.complaints_unconsumed(since=time.time() - 24 * 3600,
+                                           limit=300)
+    if not rows:
+        return
+    lines = [f"[{r.get('chat')}] {r.get('sender_display') or r.get('sender')}: "
+             f"{(r.get('content') or '')[:80]}" for r in rows]
+    summary = ""
+    try:
+        summary = bot.personas.summarize_day(
+            "机器人吐槽", lines,
+            "以下是用户对微信机器人（群答疑/免@接话/私聊回复）的吐槽原声。"
+            "请：1) 归纳 2~4 类共性问题（按严重度排序）；2) 每类给一条具体"
+            "可落地的优化建议。口语化简洁，总共 300 字内")
+    except Exception as e:
+        log.warning("吐槽复盘摘要失败: %s", e)
+    if not summary:
+        cnt = Counter()
+        for r in rows:
+            for w in (r.get("marks") or "").split("、"):
+                if w:
+                    cnt[w] += 1
+        top = "、".join(f"{w}×{n}" for w, n in cnt.most_common(6))
+        summary = f"[简版] 近 24h 吐槽 {len(rows)} 条，高频词：{top or '无'}"
+    quotes = "\n".join(f"· {l[:90]}" for l in lines[:5])
+    day = _today()
+    body = (f"🧾 机器人吐槽复盘（{day}，近24h {len(rows)} 条）\n{summary}\n\n"
+            f"原声摘录：\n{quotes}")
+    g = _gate(bot)
+    ok, why = g.allow("complaint", push_to, body) if g else (True, "ok")
+    if not ok:
+        log.warning("吐槽复盘被闸门拦截: %s", why)
+        return
+    if bot.send(push_to, body, "digest"):
+        bot.store.mark_complaints_consumed([r["id"] for r in rows])
+        log.info("吐槽复盘已推送：%d 条", len(rows))
+
+
+def report_complaints_now(bot):
+    """#吐槽：即时汇总未消化吐槽（不清空缓存，每晚自动分析消化）。"""
+    rows = bot.store.complaints_unconsumed(limit=50)
+    if not rows:
+        return "还没收集到对机器人的吐槽"
+    out = ["近期吐槽原声："] + [
+        f"· [{r.get('chat')}] {r.get('sender_display') or r.get('sender')}："
+        f"{(r.get('content') or '')[:40]}" for r in rows[:15]]
+    out.append(f"共 {len(rows)} 条（每晚自动分析总结并给优化建议）")
+    return "\n".join(out)
