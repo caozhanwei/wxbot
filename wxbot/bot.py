@@ -46,6 +46,17 @@ def _num(v, default):
         return float(default)
 
 
+def _limit_reply(group_cfg, text):
+    """按群配置 max_reply_chars 截短群回复（0/未配=不限）。"""
+    try:
+        n = int(_num((group_cfg or {}).get("max_reply_chars"), 0))
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0 and text:
+        return personas.limit_chars(text, n)
+    return text
+
+
 class Bot:
     def __init__(self, cfg_path="bot_config.yaml", with_web=True, cfg=None, state=None,
                  driver=None):
@@ -317,7 +328,34 @@ class Bot:
         qa = g.get("qa") or {}
         mg = g.get("manage") or {}
         names = self.driver.mention_names(g)
+
+        def _is_at_target(m):
+            if m["type"] != "文本" or m["content"].startswith("<?xml"):
+                return False
+            if m["is_self"] or not m["sender"] or self.state["paused"]:
+                return False
+            return group_logic.at_bot(m["content"], names) or \
+                self.driver.self_id in (m.get("at_users") or [])
+
+        # @答疑优先且一批只答最新的一条：积压时旧@早已被群聊顶替，逐条回旧问题
+        # 正是"舍近求远答老问题"的根因；超过过气时限的@直接跳过不再补答。
+        handled = set()
+        targets = [m for m in msgs if qa.get("enabled") and _is_at_target(m)]
+        if targets:
+            now = time.time()
+            stale_sec = 60.0 * _num(qa.get("stale_min")
+                                    or self.cfg.reply_cfg.get("qa_stale_min"), 10)
+            pick = next((m for m in reversed(targets)
+                         if now - float(m.get("ts") or now) <= stale_sec), None)
+            if pick is None:
+                log.info("群答疑 %s: %d 条@均已超过 %.0f 分钟，视为过气跳过",
+                         w["display"], len(targets), stale_sec / 60.0)
+            else:
+                self._group_qa(w, pick)
+            handled = {id(m) for m in targets}
         for m in msgs:
+            if id(m) in handled:
+                continue
             if m["type"] == "系统消息":
                 if mg.get("welcome"):
                     name = group_logic.join_name(m["content"])
@@ -329,11 +367,6 @@ class Bot:
             if m["type"] != "文本" or m["content"].startswith("<?xml"):
                 continue
             if self.state["paused"]:
-                continue
-            at_me = group_logic.at_bot(m["content"], names) or \
-                self.driver.self_id in (m.get("at_users") or [])
-            if qa.get("enabled") and at_me:
-                self._group_qa(w, m)      # @机器人：原有答疑链路，不受免@冷却限制
                 continue
             word = None
             if mg.get("forbidden_words"):
@@ -356,6 +389,7 @@ class Bot:
         g = w["cfg"]
         qa = g.get("qa") or {}
         names = self.driver.mention_names(g)
+        maxc = int(_num(g.get("max_reply_chars"), 0))
         raw_msg_content = m.get("content") or ""
         question = group_logic.strip_at(raw_msg_content, names)
         if question == raw_msg_content.strip() and \
@@ -407,10 +441,12 @@ class Bot:
                 w["display"],
                 lambda avoid: self.personas.casual_group_reply(
                     g.get("persona", "通用朋友"), w["display"], ctx, asker, question,
-                    profile=profile, self_profile=self_profile, avoid_lines=avoid),
+                    profile=profile, self_profile=self_profile, avoid_lines=avoid,
+                    max_chars=maxc),
                 "闲聊接话")
             if casual:
-                self.send_quote(w["display"], casual, target_name=asker, target_content=raw_msg_content)
+                self.send_quote(w["display"], _limit_reply(w["cfg"], casual),
+                                target_name=asker, target_content=raw_msg_content)
             return
         try:
             if standalone == question:
@@ -434,13 +470,16 @@ class Bot:
                                                        w["display"], ctx, standalone,
                                                        asker, profile=profile,
                                                        self_profile=self_profile,
-                                                       avoid_lines=self._recent_replies(w["display"]))
-                    self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
+                                                       avoid_lines=self._recent_replies(w["display"]),
+                                                       max_chars=maxc)
+                    self.send_quote(w["display"], _limit_reply(w["cfg"], reply),
+                                    target_name=asker, target_content=raw_msg_content)
                 except Exception as ee:
                     log.warning("LLM 兜底也失败: %s", ee)
             return
         if hit:
-            self.send_quote(w["display"], answer, target_name=asker, target_content=raw_msg_content)
+            self.send_quote(w["display"], _limit_reply(w["cfg"], answer),
+                            target_name=asker, target_content=raw_msg_content)
         elif grounded and qa.get("grounded_reply", True):
             self.store.add_qa_pending(w["display"], asker, standalone, answer)
             # 消除原始技术文档直接外露：通过人设引擎将参考资料润色为自然对话
@@ -448,18 +487,22 @@ class Bot:
                                                w["display"], ctx, standalone,
                                                asker, profile=profile, kb_ref=answer,
                                                self_profile=self_profile,
-                                               avoid_lines=self._recent_replies(w["display"]))
-            self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
+                                               avoid_lines=self._recent_replies(w["display"]),
+                                               max_chars=maxc)
+            self.send_quote(w["display"], _limit_reply(w["cfg"], reply),
+                            target_name=asker, target_content=raw_msg_content)
         else:
             self.store.add_qa_pending(w["display"], asker, standalone)
             reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                w["display"], ctx, standalone,
                                                asker, profile=profile,
                                                self_profile=self_profile,
-                                               avoid_lines=self._recent_replies(w["display"]))
+                                               avoid_lines=self._recent_replies(w["display"]),
+                                               max_chars=maxc)
             if not reply:
                 reply = "这个我手头暂时没查到准确资料，已帮你记下反馈给群里小伙伴啦～"
-            self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
+            self.send_quote(w["display"], _limit_reply(w["cfg"], reply),
+                            target_name=asker, target_content=raw_msg_content)
             self.notify_admins(f"[待沉淀] {w['display']} {asker}: {standalone[:80]}")
 
     def _recent_replies(self, display, limit=6):
@@ -494,12 +537,22 @@ class Bot:
     # ---------- 群定时任务（群主/管理员 @机器人 固化指令） ----------
     _TASK_KEYWORDS = ("总结", "提醒", "定时", "每天", "每周", "任务", "几点", "取消", "固定")
 
-    def _task_admin_ids(self, gid):
-        ids = {a for a in (self.cfg.admins or []) if a}
-        owner = self.driver.chat_owner(gid) if hasattr(self.driver, "chat_owner") else ""
+    def _is_task_admin(self, w, m):
+        """谁能在本群对机器人发号施令：全局 admins ∪ 群配置 admins（填昵称自动匹配）∪ 群主。"""
+        allow_ids = {str(a).strip() for a in (self.cfg.admins or []) if str(a).strip()}
+        owner = self.driver.chat_owner(w["user"]) if hasattr(self.driver, "chat_owner") else ""
         if owner:
-            ids.add(owner)
-        return ids
+            allow_ids.add(owner)
+        sender = m.get("sender") or ""
+        display = (m.get("sender_display") or "").strip()
+        if sender in allow_ids:
+            return True
+        for a in {str(x).strip() for x in (w["cfg"].get("admins") or []) if str(x).strip()}:
+            if a == sender or a == display:
+                return True
+            if len(a) >= 2 and a in display:   # 群名片常带前后缀，按包含匹配
+                return True
+        return False
 
     def _maybe_task_command(self, w, m, question=None):
         """群主/管理员的 @消息若是定时任务指令则处理并返回 True，否则返回 False 走原答疑。"""
@@ -508,7 +561,7 @@ class Bot:
                                             self.driver.mention_names(w["cfg"]))
         if not question:
             return False
-        if m.get("sender") not in self._task_admin_ids(w["user"]):
+        if not self._is_task_admin(w, m):
             return False
         if not any(k in question for k in self._TASK_KEYWORDS):
             return False
@@ -658,7 +711,7 @@ class Bot:
             "免@接话")
         if not reply:
             return
-        if self.send(w["display"], reply, "no_at"):
+        if self.send(w["display"], _limit_reply(w["cfg"], reply), "no_at"):
             marks[w["user"]] = time.time()
 
     def _sink_to_kb(self, w):
@@ -729,7 +782,8 @@ class Bot:
         try:
             return self.personas.context_reply(
                 w["cfg"].get("persona", "群管家-热心"), w["display"], context, ref,
-                active=active, avoid_lines=avoid)
+                active=active, avoid_lines=avoid,
+                max_chars=int(_num(w["cfg"].get("max_reply_chars"), 0)))
         except Exception as e:
             log.warning("免@回复生成失败(%s): %s", w["display"], e)
             return ""

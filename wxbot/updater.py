@@ -32,8 +32,34 @@ def is_newer(latest_tag, current_tag=VERSION) -> bool:
     return bool(a and b) and a > b
 
 
-def check_latest(timeout=10) -> dict:
-    """查 GitHub 最新 Release → {ok, latest, newer, msi_url, notes, message}。"""
+def _check_mirror(base, timeout) -> dict:
+    """国内镜像源（自建 nginx 静态目录）：GET {base}/manifest.json。"""
+    try:
+        r = requests.get(f"{base}/manifest.json", timeout=timeout, headers=_UA)
+        r.raise_for_status()
+        d = r.json()
+    except Exception as e:
+        return {"ok": False, "latest": "", "newer": False, "msi_url": "",
+                "notes": "", "message": f"镜像源检查失败：{e}"}
+    tag = str(d.get("version") or "")
+    msi = str(d.get("msi") or "")
+    if not tag or not msi:
+        return {"ok": False, "latest": "", "newer": False, "msi_url": "",
+                "notes": "", "message": "镜像源 manifest 缺 version/msi"}
+    return {"ok": True, "latest": tag, "newer": is_newer(tag),
+            "msi_url": f"{base}/{msi}", "notes": str(d.get("notes") or "").strip()[:1200],
+            "message": ""}
+
+
+def check_latest(timeout=10, mirror="") -> dict:
+    """查最新版 → {ok, latest, newer, msi_url, notes, message}。
+
+    配了镜像源（app.update_mirror）先走镜像（国内直连 GitHub 常超时），失败回落 GitHub。
+    """
+    if mirror:
+        res = _check_mirror(mirror.rstrip("/"), timeout)
+        if res["ok"]:
+            return res
     try:
         r = requests.get(API_LATEST, timeout=timeout, headers=_UA)
         r.raise_for_status()

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="微信智能助手" Codepage="936" Language="2052" Version="1.4.10"
+  <Package Name="微信智能助手" Codepage="936" Language="2052" Version="1.4.11"
            Manufacturer="wxbot" Scope="perUser"
            UpgradeCode="211cd010-c416-4fd9-a6b6-fa35caf03570">
     <MajorUpgrade DowngradeErrorMessage="已安装更高版本，请先卸载后再安装此版本！" />

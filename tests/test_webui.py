@@ -394,3 +394,33 @@ def test_group_no_at_reply_toggle(client):
     g = _load(path)["groups"][0]
     assert g["no_at_reply"] is False
     assert g["no_at_context"] == 25
+
+
+def test_group_save_persists_g_admins_and_visible(client):
+    c, bot, path = client
+    c.post("/cfg/group", data={
+        "idx": "0", "do": "save", "enabled": "on", "display": "测试群",
+        "id": "111@chatroom", "persona": "老友幽默",
+        "qa_enabled": "on", "g_admins": "老王, 张三",
+    }, follow_redirects=True)
+    g = _load(path)["groups"][0]
+    assert g["admins"] == ["老王", "张三"]
+    body = c.get("/").data.decode("utf-8")
+    # 群卡片输入框回显 + 任务权限行显示按群添加的指令管理员
+    assert "指令管理员" in body
+    assert "按群添加的指令管理员" in body and "测试群：老王、张三" in body
+
+
+def test_group_save_empty_g_admins_clears(client):
+    c, bot, path = client
+    c.post("/cfg/group", data={
+        "idx": "0", "do": "save", "enabled": "on", "display": "测试群",
+        "id": "111@chatroom", "persona": "老友幽默",
+        "qa_enabled": "on", "g_admins": "老王",
+    }, follow_redirects=True)
+    c.post("/cfg/group", data={
+        "idx": "0", "do": "save", "enabled": "on", "display": "测试群",
+        "id": "111@chatroom", "persona": "老友幽默",
+        "qa_enabled": "on", "g_admins": "",
+    }, follow_redirects=True)
+    assert _load(path)["groups"][0]["admins"] == []

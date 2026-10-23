@@ -14,7 +14,7 @@ python run_bot.py --check                # 自检：窗口/自身/LLM/KB 连通
 python run_bot.py --list                 # 列出最近会话与群 id（用于填配置）
 python run_bot.py --test-reply 文件传输助手 你好   # 全链路测试（请先用文件传输助手）
 python run_bot.py                        # 启动（含 Web 状态页 http://127.0.0.1:8778）
-python -m pytest tests/ -q               # 133 个用例
+python -m pytest tests/ -q               # 230+ 个用例
 ```
 
 ## 能力
@@ -51,6 +51,10 @@ python -m pytest tests/ -q               # 133 个用例
 - **关于与一键升级**（v1.4.8）：Web 页「关于」卡片显示当前版本，一键检查 GitHub 最新 Release；有新版可直接下载安装包（带进度）→「立即安装并重启」，全程无需手动下载 MSI（配置/画像/聊天数据都在 %APPDATA%，升级不丢）
 - **任务权限显性化**（v1.4.9）：「群定时任务」卡片直接显示谁有权限下任务指令——配置的管理员名单 + 每个群的群主（自动从微信读，无需去配置文件翻）
 - **一键升级关键修复**（v1.4.10）：升级器启动标志由 DETACHED_PROCESS 改 CREATE_NO_WINDOW——前者会让 PowerShell 无控制台静默退出、脚本一行不执行（应用内点「立即安装」无任何反应的根因），已真机 1.4.9→1.4.10 升级链路验证
+- **回复字数上限**（v1.4.11）：群卡片可设「回复字数上限」（0~200，0=不限）——嫌机器人话多就设小；生成端 prompt 与发送端双层兜底，超出自动按句边界截短（绝不腰斩半句话），@答疑与免@接话都生效
+- **只答最新提问**（v1.4.11）：机器人忙不过来积压多条@时，一批里只回答**最新**的那条（旧@已被群聊顶替，补答只会答非所问）；超过 10 分钟的陈年@视为过气不再翻旧账（群可配 `qa.stale_min` 调整）
+- **按群设置指令管理员**（v1.4.11）：群卡片「指令管理员」直接填**昵称**即可（无需知道 wxid，群名片带前后缀也能包含匹配），这些人 @机器人 就能下定时任务指令；全局管理员与群主天然有权限，「群定时任务」卡片会显示各群生效的管理员名单
+- **国内镜像升级源**（v1.4.11）：`app.update_mirror` 配自建镜像 URL 后，检查更新与下载优先走国内镜像（GitHub 直连不稳的环境），镜像不可用自动回落 GitHub Releases
 
 ## 配置要点（bot_config.yaml）
 
@@ -59,8 +63,9 @@ python -m pytest tests/ -q               # 133 个用例
 - `ocr`：图片识别服务（可选，paddle OCR MCP：url/api_key/timeout；不配则图片只显示 `[图片]`）
 - `asr`：语音识别服务（可选，OpenAI 兼容 `/v1/audio/transcriptions`：url/api_key/model/timeout；不配则语音只显示 `[语音]`）
 - `contacts`：`id`（微信号/wxid，不知道可只填 `display` 自动反查；更推荐直接从 Web 页"最近会话"点选）+ `persona` + `enabled`
-- `groups`：`--list` 查 id 或 Web 页点选；`qa.enabled` 答疑开关；`no_at_reply` 免@接话（`no_at_context`/`no_at_cooldown_min` 可调，Web 页群卡片有开关）；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
+- `groups`：`--list` 查 id 或 Web 页点选；`admins` 按群添加指令管理员（填昵称即可）；`max_reply_chars` 回复字数上限（0=不限）；`qa.stale_min` @过气时限（分钟，默认 10）；`qa.enabled` 答疑开关；`no_at_reply` 免@接话（`no_at_context`/`no_at_cooldown_min` 可调，Web 页群卡片有开关）；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
 - `app.dry_run: true` 只记日志不发送（**模板默认开**，新装机先在演示模式验证）
+- `app.update_mirror`：升级检查国内镜像源（自建 nginx 静态目录的 URL，如 `http://your-server:21120/wxbot-update`）；留空走 GitHub，配了优先镜像、失败自动回落
 - `app.self_wxid` / `app.setup_done`：程序自动维护（多账号隔离标识/向导完成标志），勿手改
 
 ## 数据与升级

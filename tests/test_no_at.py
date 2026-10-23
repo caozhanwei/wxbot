@@ -143,7 +143,7 @@ def bot(tmp_path):
 
 def _msg(content, sender="wxid_a", name="阿强", seq=10):
     return {"type": "文本", "is_self": False, "sender": sender,
-            "sender_display": name, "content": content, "seq": seq, "ts": 1}
+            "sender_display": name, "content": content, "seq": seq, "ts": time.time()}
 
 
 def _w(bot):

@@ -172,3 +172,54 @@ def test_apply_update_default_install_dir(tmp_path, monkeypatch, ):
                         lambda args, creationflags=0, close_fds=True: seen.update(args=args))
     updater.apply_update(str(msi))
     assert "wxbot.exe" in seen["args"][-1]
+
+
+# ---------- 镜像源（app.update_mirror 优先，失败回落 GitHub） ----------
+class _ManifestResp(_FakeResp):
+    def __init__(self, payload):
+        super().__init__(payload)
+
+
+def test_check_latest_uses_mirror_manifest(monkeypatch):
+    def fake_get(url, timeout=10, headers=None, stream=False):
+        assert url == "http://m.example/wxbot-update/manifest.json"
+        return _ManifestResp({"version": "v9.9.9", "msi": "wxbot-v9.9.9.msi",
+                              "notes": "镜像版说明"})
+
+    monkeypatch.setattr(updater.requests, "get", fake_get)
+    res = updater.check_latest(mirror="http://m.example/wxbot-update/")
+    assert res["ok"] and res["latest"] == "v9.9.9" and res["newer"] is True
+    assert res["msi_url"] == "http://m.example/wxbot-update/wxbot-v9.9.9.msi"
+    assert res["notes"] == "镜像版说明"
+
+
+def test_check_latest_mirror_same_version_not_newer(monkeypatch):
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda *a, **k: _ManifestResp({"version": "v" + VERSION,
+                                                       "msi": "x.msi"}))
+    res = updater.check_latest(mirror="http://m")
+    assert res["ok"] and res["newer"] is False
+
+
+def test_check_latest_mirror_error_falls_back_to_github(monkeypatch):
+    def fake_get(url, timeout=10, headers=None, stream=False):
+        if "manifest.json" in url:
+            raise RuntimeError("mirror down")
+        return _FakeResp({"tag_name": "v9.9.9", "assets": [
+            {"name": "wxbot-v9.9.9.msi", "browser_download_url": "https://gh/x.msi"}]})
+
+    monkeypatch.setattr(updater.requests, "get", fake_get)
+    res = updater.check_latest(mirror="http://m")
+    assert res["ok"] and res["latest"] == "v9.9.9"
+    assert res["msi_url"] == "https://gh/x.msi"
+
+
+def test_check_latest_mirror_bad_manifest_falls_back(monkeypatch):
+    def fake_get(url, timeout=10, headers=None, stream=False):
+        if "manifest.json" in url:
+            return _ManifestResp({"foo": 1})          # 缺 version/msi
+        return _FakeResp({"tag_name": "v9.9.9", "assets": []})
+
+    monkeypatch.setattr(updater.requests, "get", fake_get)
+    res = updater.check_latest(mirror="http://m")
+    assert res["ok"] and res["latest"] == "v9.9.9"

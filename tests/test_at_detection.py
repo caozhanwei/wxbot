@@ -2,6 +2,7 @@
 """@机器人检测：msgsource atuserlist 直读 wxid（群名片≠微信昵称时也能命中）+ 通用 @ 前缀剥离。"""
 import os
 import sys
+import time
 
 import pytest
 
@@ -203,7 +204,7 @@ def _make_bot(tmp_path):
 
 def _msg(content, at_users=None, seq=10):
     return {"type": "文本", "is_self": False, "sender": "wxid_a",
-            "sender_display": "阿强", "seq": seq, "ts": 1,
+            "sender_display": "阿强", "seq": seq, "ts": time.time(),
             "content": content, "at_users": at_users or []}
 
 

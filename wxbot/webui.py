@@ -483,6 +483,8 @@ details summary:hover{color:var(--primary)}
       <label><input type="checkbox" name="grounded" {{ 'checked' if (g.qa or {}).get('grounded_reply', True) }}> 带参考回复</label>
       <label><input type="checkbox" name="llm_fallback" {{ 'checked' if (g.qa or {}).get('llm_fallback') }}> 知识库断线走人设</label>
       <label><input type="checkbox" name="mine" {{ 'checked' if g.mine }}> 自动挖历史</label>
+      <label title="机器人每次在群里说的最多字数（@答疑与免@接话都生效），超出自动按句截短；0=不限">回复字数上限：<input type="number" name="max_reply_chars" value="{{ g.max_reply_chars or 0 }}" min="0" max="200" step="10" style="width:60px"> 字</label>
+      <label title="这些人在群里 @机器人 就能下定时任务指令（如“每天晚上9点总结群消息”）。填微信昵称或群名片即可，不用知道 id，应用自动匹配；全局管理员和群主天然有权限">指令管理员：<input type="text" name="g_admins" value="{{ (g.admins or []) | join(', ') }}" style="width:170px" placeholder="填昵称，逗号分隔"></label>
       <span class="muted" style="margin-left:auto">@机器人提问触发；自动挖历史=定时把群聊增量抽成问答</span>
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
@@ -640,6 +642,7 @@ details summary:hover{color:var(--primary)}
     <b>谁有权限下任务指令：</b>
     <span>配置的管理员：{{ admins | join('、') if admins else '（未配置）' }}</span>
     {% for go in group_owners %}<span class="muted">｜{{ go.gname }} 群主：{{ go.owner }}</span>{% endfor %}
+    {% if gadmin_lines %}<span class="muted">｜按群添加的指令管理员 → {{ gadmin_lines | join('｜') }}</span>{% endif %}
     {% if not driver_up %}<span class="muted">（微信未连接，群主名单暂不可见）</span>{% endif %}
   </div>
   <div class="table-responsive">
@@ -837,7 +840,11 @@ details summary:hover{color:var(--primary)}
     <form method="post" action="/update/check">
       <button class="btn btn-sm btn-primary">🔍 检查更新</button>
     </form>
-    <span class="muted" style="font-size:12px">检查与下载走 GitHub Releases，需本机能访问 github.com</span>
+    {% if update_mirror %}
+    <span class="muted" style="font-size:12px">已配置国内镜像加速（{{ update_mirror }}），失败自动回落 GitHub</span>
+    {% else %}
+    <span class="muted" style="font-size:12px">检查与下载走 GitHub Releases，需本机能访问 github.com（可在配置 app.update_mirror 设国内镜像）</span>
+    {% endif %}
   </div>
   {% if update_check %}
   <div style="margin-top:12px">
@@ -1070,6 +1077,8 @@ def start_web(bot):
                              for w in bot.store.warn_counts()[:8]) or "无",
             logs=logs, pending=bot.store.qa_pending(20),
             group_owners=_group_owners(driver, snap.get("groups") or []),
+            gadmin_lines=[f"{g.get('display') or g.get('id')}：{'、'.join(g.get('admins') or [])}"
+                          for g in (snap.get("groups") or []) if g.get("admins")],
             pending_issues=bot.store.pending_issues(limit=20),
             tasks=bot.store.list_tasks(),
             bootstrap_status=bootstrap.status(),
@@ -1084,6 +1093,7 @@ def start_web(bot):
             p_prev=(_href(p_page=p_page - 1) if p_page > 1 else ""),
             p_next=(_href(p_page=p_page + 1) if p_page < p_pages else ""),
             app_version=updater.current_version(),
+            update_mirror=str((snap.get("app") or {}).get("update_mirror") or "").strip(),
             update_check=_UPDATE_CHECK.get("res"),
             update_status=updater.status(),
             cfg_text=yaml.safe_dump(snap, allow_unicode=True, sort_keys=False))
@@ -1108,7 +1118,8 @@ def start_web(bot):
     # ---------- 在线更新 ----------
     @app.post("/update/check")
     def update_check():
-        _UPDATE_CHECK["res"] = updater.check_latest()
+        mirror = str((bot.cfg.data.get("app") or {}).get("update_mirror") or "").strip()
+        _UPDATE_CHECK["res"] = updater.check_latest(mirror=mirror)
         return redirect("/#about")
 
     @app.post("/update/download")
@@ -1272,7 +1283,9 @@ def start_web(bot):
         }
         data["no_at_reply"] = bool(f.get("no_at_reply"))
         data["active"] = bool(f.get("active"))
-        for key, cast in (("no_at_context", int), ("no_at_cooldown_min", float)):
+        data["admins"] = [a.strip() for a in (f.get("g_admins") or "").split(",") if a.strip()]
+        for key, cast in (("no_at_context", int), ("no_at_cooldown_min", float),
+                          ("max_reply_chars", int)):
             raw = (f.get(key) or "").strip()
             if raw:
                 try:
@@ -1284,7 +1297,7 @@ def start_web(bot):
         elif idx < len(groups):
             old = groups[idx]
             data["manage"]["mention_names"] = (old.get("manage") or {}).get("mention_names") or []
-            for key in ("no_at_context", "no_at_cooldown_min"):
+            for key in ("no_at_context", "no_at_cooldown_min", "max_reply_chars"):
                 if key not in data and old.get(key) is not None:
                     data[key] = old[key]
             groups[idx] = data

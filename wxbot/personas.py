@@ -84,6 +84,33 @@ def clean_ai_markers(text: str) -> str:
     return t.strip()
 
 
+_SENT_END = "。！？!?；;\n…）)"
+_SENT_MID = "，,、"
+
+
+def limit_chars(text: str, n) -> str:
+    """把回复截短到 n 字以内：优先句末边界收口，其次逗号，实在不行硬截；0/非法=不限。
+
+    边界只在后半段找（地板线=max(5, n/2)），避免为凑句边界把话截得太短没法读。
+    """
+    t = (text or "").strip()
+    try:
+        n = int(n or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0 or len(t) <= n:
+        return t
+    head = t[:n]
+    floor = max(5, n // 2)
+    for chars, keep in ((_SENT_END, True), (_SENT_MID, False)):
+        for i in range(len(head) - 1, floor - 1, -1):
+            if head[i] in chars:
+                cut = head[:i + 1].strip() if keep else head[:i].strip()
+                if cut:
+                    return cut
+    return head.rstrip("，,、；;：: ") or head
+
+
 def _bigrams(s: str) -> set:
     s = re.sub(r"\s+", "", s or "")
     return {s[i:i + 2] for i in range(len(s) - 1)}
@@ -183,11 +210,12 @@ class PersonaEngine:
             return current_memory
 
     def context_reply(self, persona_name, group, context_lines, kb_ref="", active=False,
-                      avoid_lines=None):
+                      avoid_lines=None, max_chars=0):
         """免@主动接话：没被@时按群聊上下文自然回复，可并入知识库参考。
 
         active=True（活跃分子模式）：接话姿态更放松，接梗/附议/补充/引申提问都行，
         像真人群友一样自然参与，不做"只在值得帮忙时才说话"的束缚。
+        max_chars：群配置的回复字数上限（0=用默认 120）。
         """
         p = self.cfg.persona(persona_name)
         if active:
@@ -195,10 +223,11 @@ class PersonaEngine:
                     "引申提问都行，像真人群友一样自然参与。")
         else:
             tone = "你没有被@，是看到群里有值得帮忙的话题顺带接一句。"
+        cap = int(max_chars) if max_chars else 120
         system = (f'你是微信群"{group}"里的助手。说话风格：{p.get("style")}。'
                   f'背景：{p.get("background") or "帮群友答疑的技术助手"}。' + tone +
                   "只输出一条可直接发送的微信群文本：不要@任何人、不要解释、"
-                  "不要引号、不要markdown，不超过 120 字；"
+                  f"不要引号、不要markdown，不超过 {cap} 字；"
                   "没把握就直说不确定，别编造。")
         user = "群里最近的对话：\n" + "\n".join(context_lines)
         if kb_ref:
@@ -284,16 +313,18 @@ class PersonaEngine:
         return {"standalone": standalone, "should_answer": bool(d.get("should_answer", True))}
 
     def group_answer(self, persona_name, group, context_lines, question,
-                     asker, profile="", kb_ref="", self_profile="", avoid_lines=None):
+                     asker, profile="", kb_ref="", self_profile="", avoid_lines=None,
+                     max_chars=0):
         """@提问的群内回答：结合上下文与双方画像，像真人接话一样答，可引用群友观点。"""
         p = self.cfg.persona(persona_name)
+        cap = int(max_chars) if max_chars else 200
         system = (f'你是微信群"{group}"里的助手（有人@你提问）。'
                   f"回答风格：{p.get('style')}。背景：{p.get('background') or '帮群友答疑'}。"
                   "结合群里最近的讨论来回答：像顺着大家话头接话，不重复别人已说透的点，"
                   "可以自然引用群友昵称提到的观点（如\"刚才xx说的对\"）；"
                   "答案不确定就直说，别编造。"
                   "只输出一条可直接发送的微信群文本：不要@提问者以外的其他人、"
-                  "不要解释、不要引号、不要markdown，不超过 200 字。")
+                  f"不要解释、不要引号、不要markdown，不超过 {cap} 字。")
         user = "群里最近的对话：\n" + "\n".join(context_lines)
         if self_profile:
             user += f"\n\n你本人（号主）在群里的画像，回答口吻与立场保持一致：{self_profile}"
@@ -310,9 +341,10 @@ class PersonaEngine:
         return _sanitize(raw)
 
     def casual_group_reply(self, persona_name, group, context_lines, asker, question,
-                           profile="", self_profile="", avoid_lines=None):
+                           profile="", self_profile="", avoid_lines=None, max_chars=0):
         """群聊闲聊、调侃、玩笑或纯@时的拟人回复：拒绝死板机器人话术，幽默机智接地气。"""
         p = self.cfg.persona(persona_name)
+        cap = int(max_chars) if max_chars else 50
         system = (
             f'你是微信群"{group}"里的群友兼小助手。'
             f"你的说话风格：{p.get('style') or '幽默风趣、接地气、机智嘴甜'}。"
@@ -320,7 +352,7 @@ class PersonaEngine:
             "群友现在在跟你开玩笑、打趣调侃、闲聊或者纯@你互动，并不是正经的技术/业务提问。"
             "请像个熟人朋友一样自然接话或打趣，语气生动接地气，可以带适当微信自带表情符号（如 [呲牙] [捂脸] [笑哭]）。"
             "绝对禁止说'哈哈我在呢'、'有问题随时问我'、'我是人工智能'等任何机器人客服死模板！"
-            "只输出一条直接可发的微信短句，不要超过 50 字，不要带任何前缀解释。"
+            f"只输出一条直接可发的微信短句，不要超过 {cap} 字，不要带任何前缀解释。"
         )
         user = f"群：{group}\n对方：{asker}"
         if profile:
