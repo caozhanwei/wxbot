@@ -270,3 +270,43 @@ def test_active_skips_judge_even_with_no_at_on(bot):
     bot.personas._llm = llm
     bot._on_group_msgs(_w(bot), [_msg("哈哈哈")])
     assert llm.judged == 0 and llm.chatted == 1
+
+
+def test_no_at_reply_quotes_trigger_message(bot):
+    """默认走引用回复：目标=触发人 + 触发消息正文，kind=no_at 照常落日志。"""
+    llm = FakeLLM()
+    bot.personas._llm = llm
+    calls = []
+    orig = bot.send_quote
+
+    def rec(display, text, target_name="", target_content="", kind="qa"):
+        calls.append((display, text, target_name, target_content, kind))
+        return orig(display, text, target_name=target_name,
+                    target_content=target_content, kind=kind)
+
+    bot.send_quote = rec
+    bot._on_group_msgs(_w(bot), [_msg("求一份用户手册")])
+    assert len(calls) == 1
+    display, text, tname, tcontent, kind = calls[0]
+    assert (display, tname, tcontent, kind) == (
+        "老司机养成记", "阿强", "求一份用户手册", "no_at")
+    assert "NETLIST_FILE" in text
+    recs = _logs(bot, "no_at")
+    assert len(recs) == 1 and "NETLIST_FILE" in recs[0]["detail"]
+    assert bot.state["no_at_last"][GROUP] > 0
+
+
+def test_no_at_quote_switch_off_sends_plain(bot):
+    """no_at_quote: false 时退回纯文本发送（部分群只要文字不要气泡）。"""
+    llm = FakeLLM()
+    bot.personas._llm = llm
+    bot.watch[0]["cfg"]["no_at_quote"] = False
+    quoted, plain = [], []
+    orig_q, orig_s = bot.send_quote, bot.send
+    bot.send_quote = lambda *a, **k: quoted.append(a) or True
+    bot.send = lambda display, text, kind="reply": plain.append((display, text, kind)) or True
+    bot._on_group_msgs(_w(bot), [_msg("求一份用户手册")])
+    assert not quoted
+    assert len(plain) == 1 and plain[0][2] == "no_at"
+    assert "NETLIST_FILE" in plain[0][1]
+    assert bot.state["no_at_last"][GROUP] > 0

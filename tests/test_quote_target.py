@@ -122,3 +122,97 @@ def test_driver_fallback_names_asker_not_others():
     assert ok is True
     assert "「回复 @张三」" in d.uia.last_sent
     assert "三点开会" in d.uia.last_sent
+
+
+# ---------- 翻页找历史消息（目标被顶出可视区） ----------
+
+import wechatauto.uia_driver as _ud
+from wechatauto.uia_driver import WeChatUIA
+
+
+class _Pager:
+    """绕过重量级 __init__ 的 WeChatUIA 实例，按页喂 OCR 结果。"""
+
+    def __init__(self, pages, wheel_ok=True):
+        self.u = object.__new__(WeChatUIA)
+        self.pages = list(pages)          # 每页 OCR 结果（屏幕坐标 items）
+        self.ocr_calls = 0
+        self.wheel_ok = wheel_ok
+        self.scrolled = []                # (delta, notches)
+        self.restored = 0
+        self.clicked = []
+        self.u._message_list = lambda: object()          # lst 只当句柄传
+        self.u._ocr_message_area = self._ocr
+        self.u._wheel_list = self._wheel
+        self.u._restore_chat_bottom = self._restore
+        self.u._set_cursor = lambda x, y: self.clicked.append(("move", x, y))
+        self.u._right_click = lambda: self.clicked.append("rclick")
+
+    def _ocr(self, lst):
+        i = min(self.ocr_calls, len(self.pages) - 1)
+        self.ocr_calls += 1
+        return self.pages[i]
+
+    def _wheel(self, lst, delta, notches=1, settle=0.2):
+        self.scrolled.append((delta, notches))
+        return self.wheel_ok
+
+    def _restore(self):
+        self.restored += 1
+
+
+def _mk_pager(monkeypatch, pages, **kw):
+    monkeypatch.setattr(_ud.rhythm, "nap", lambda s: None)
+    return _Pager(pages, **kw)
+
+
+def test_locate_visible_first_page_no_scroll(monkeypatch):
+    """可视区就命中：一次 OCR、零滚动、不触发恢复。"""
+    p = _mk_pager(monkeypatch, [[("几点开会放PPT", 10, 300, 120, 20)]])
+    pt = p.u._locate_message_pt("几点开会放PPT", max_pages=5)
+    assert pt is not None
+    assert p.ocr_calls == 1
+    assert p.scrolled == []
+    assert p.restored == 0
+    assert "rclick" in p.clicked
+
+
+def test_locate_scroll_up_finds_on_second_page(monkeypatch):
+    """第 0 页没有、翻一页后命中：向上滚 5 格、找到即停、不回滚。"""
+    p = _mk_pager(monkeypatch, [
+        [("别人插话刷屏了", 10, 300, 120, 20)],
+        [("@群助手 几点开会", 10, 300, 120, 20)],
+    ])
+    pt = p.u._locate_message_pt("@群助手 几点开会", max_pages=5)
+    assert pt is not None
+    assert p.ocr_calls == 2
+    assert p.scrolled == [(120, 5)]
+    assert p.restored == 0
+
+
+def test_locate_gives_up_caps_pages_and_restores_bottom(monkeypatch):
+    """翻满 max_pages 仍没有：封顶停手、滚回底部、返回 None。"""
+    p = _mk_pager(monkeypatch, [[("无关内容", 10, 100, 80, 20)]])
+    pt = p.u._locate_message_pt("完全找不到的正文", max_pages=3)
+    assert pt is None
+    assert p.ocr_calls == 4          # 0 页 + 3 页
+    assert p.scrolled == [(120, 5)] * 3
+    assert p.restored == 1
+
+
+def test_locate_wheel_failure_stops_without_restore(monkeypatch):
+    """滚轮失败（窗口异常）：立即放弃且不误触发恢复。"""
+    p = _mk_pager(monkeypatch, [[("无关内容", 10, 100, 80, 20)]], wheel_ok=False)
+    pt = p.u._locate_message_pt("找不到的正文", max_pages=5)
+    assert pt is None
+    assert p.ocr_calls == 1
+    assert p.scrolled == [(120, 5)]  # 试了一次，失败即停
+    assert p.restored == 0
+
+
+def test_restore_bottom_uses_newer_direction():
+    """恢复现场必须滚向最新（-120），且足够多格。"""
+    p = _Pager([[("x", 1, 1, 2, 2)]])
+    del p.u._restore_chat_bottom   # 撤桩换回真实实现
+    p.u._restore_chat_bottom()
+    assert p.scrolled == [(-120, 40)]

@@ -894,7 +894,16 @@ class Bot:
             "免@接话")
         if not reply:
             return
-        if self.send(w["display"], _limit_reply(w["cfg"], reply), "no_at"):
+        text = _limit_reply(w["cfg"], reply)
+        if w["cfg"].get("no_at_quote", True):
+            # 接话引用触发那条消息：群里消息多时，纯文本回复没人知道在答谁
+            sent = self.send_quote(
+                w["display"], text,
+                target_name=m.get("sender_display") or m.get("sender") or "",
+                target_content=m.get("content") or "", kind="no_at")
+        else:
+            sent = self.send(w["display"], text, "no_at")
+        if sent:
             marks[w["user"]] = time.time()
 
     def _sink_to_kb(self, w):

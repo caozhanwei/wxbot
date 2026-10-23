@@ -1321,11 +1321,8 @@ class WeChatUIA:
                     break
         return (best[1], best[2]) if best else None
 
-    def _locate_message_pt(self, target_text: str) -> Optional[Tuple[int, int]]:
-        """OCR 可视消息区按正文定位目标消息并右键它，返回坐标；失败 None。"""
-        lst = self._message_list()
-        if lst is None:
-            return None
+    def _ocr_message_area(self, lst):
+        """截取消息列表可视区并 OCR，返回屏幕坐标 items；失败 None。"""
         try:
             from wechatauto.guia import ScreenOCR
             import PIL.ImageGrab as IG
@@ -1339,9 +1336,61 @@ class WeChatUIA:
             wxlog.debug("引用定位 OCR 失败：%s", e)
             return None
         # recognize 的坐标相对截图，换算回屏幕坐标
-        items = [(t, x + r.left, y + r.top, w, h) for (t, x, y, w, h) in res]
-        pt = self._locate_quote_point(items, target_text)
+        return [(t, x + r.left, y + r.top, w, h) for (t, x, y, w, h) in res]
+
+    def _wheel_list(self, lst, delta: int, notches: int = 1, settle: float = 0.2) -> bool:
+        """在消息列表中心滚动滚轮（ScrollPattern 不可用）。返回是否实际滚动。
+
+        实测（微信4.1.12.26）：+120 滚向历史(更早)，-120 滚向最新。
+        """
+        try:
+            r = lst.BoundingRectangle
+            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+        except Exception:
+            return False
+        for _ in range(max(1, notches)):
+            self._wheel_at(cx, cy, delta)
+            time.sleep(settle)
+        return True
+
+    def _restore_chat_bottom(self) -> None:
+        """把消息列表滚回底部（最新）。翻页找历史后恢复"打开即在底部"的现场，
+        后续的"右键最新一行"等操作都假设列表停在底部。已在底部时是空操作。"""
+        try:
+            lst = self._message_list()
+        except Exception:
+            lst = None
+        if lst is not None:
+            self._wheel_list(lst, -120, 40, settle=0.03)
+
+    def _locate_message_pt(self, target_text: str,
+                           max_pages: int = 5) -> Optional[Tuple[int, int]]:
+        """OCR 消息区按正文定位目标消息并右键它，返回坐标；失败 None。
+
+        像人一样：可视区找不到就向上翻页再找（答题几十秒，提问那行
+        早被插话顶出屏幕是常态），每页滚 5 格、停一拍等虚拟列表懒加载
+        再 OCR，最多 max_pages 页封顶防失控。找到即停（引用后发送会
+        自动跳回底部）；找不到必须滚回底部恢复现场再返回 None。
+        """
+        lst = self._message_list()
+        if lst is None:
+            return None
+        pages = max(0, int(max_pages))
+        pt = None
+        scrolled = False
+        for page in range(pages + 1):
+            items = self._ocr_message_area(lst)
+            pt = self._locate_quote_point(items or [], target_text) if items else None
+            if pt is not None:
+                break
+            if page >= pages:
+                break
+            if not self._wheel_list(lst, 120, 5, settle=0.4):
+                break
+            scrolled = True
         if pt is None:
+            if scrolled:
+                self._restore_chat_bottom()
             return None
         cx, cy = int(pt[0]), int(pt[1])
         self._set_cursor(cx, cy)
@@ -1529,6 +1578,8 @@ class WeChatUIA:
             if self._uia_click_menu_item(item):
                 rhythm.nap(0.6)
                 return self.send_text(text)
+        # 定位成功但引用菜单没出来：翻页后视图可能停在半路，滚回底部再放弃
+        self._restore_chat_bottom()
         return False
 
     # ------------------------------------------------------------------ 剪贴板粘贴
