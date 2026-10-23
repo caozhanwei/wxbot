@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""画像/记忆/问答知识资产的导出导入（跨账号迁移）。"""
+"""画像/记忆/问答知识资产的导出导入（跨账号迁移，ZIP 压缩包格式）。"""
 import io
 import json
 import os
 import sys
 import time
 import types
+import zipfile
 
 import pytest
 import yaml
@@ -164,12 +165,32 @@ def test_webui_export_download(client):
     bot.store.upsert_profile("111@chatroom", "wxid_a", "阿明", "画像内容")
     r = c.get("/knowledge/export")
     assert r.status_code == 200
-    assert "attachment" in r.headers.get("Content-Disposition", "")
-    data = json.loads(r.data)
+    assert r.mimetype == "application/zip"
+    cd = r.headers.get("Content-Disposition", "")
+    assert "attachment" in cd and ".zip" in cd
+    assert r.data[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        assert "knowledge.json" in z.namelist()
+        assert "bot_config.yaml" not in z.namelist()
+        data = json.loads(z.read("knowledge.json").decode("utf-8"))
     assert data["member_profiles"][0]["profile"] == "画像内容"
+    assert "config_yaml" not in data
+
+
+def test_webui_export_with_cfg(client):
+    c, bot = client
+    r = c.get("/knowledge/export?cfg=1")
+    assert r.status_code == 200 and r.data[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        assert "bot_config.yaml" in z.namelist()
+        cfg_in_zip = z.read("bot_config.yaml").decode("utf-8")
+        data = json.loads(z.read("knowledge.json").decode("utf-8"))
+    assert cfg_in_zip == open(bot.cfg.path, encoding="utf-8").read()
+    assert "config_yaml" not in data
 
 
 def test_webui_import_upload(client):
+    """旧版纯 JSON 文件仍然可导入（向后兼容）。"""
     c, bot = client
     payload = {"wxbot_export": 1,
                "member_profiles": [{"grp": "111@chatroom", "wxid": "wxid_b",
@@ -185,6 +206,59 @@ def test_webui_import_upload(client):
     assert bot.store.get_contact_memory("wxid_1") == "记忆"
 
 
+def _make_zip(payload, cfg_yaml=None):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("knowledge.json", json.dumps(payload, ensure_ascii=False))
+        if cfg_yaml is not None:
+            z.writestr("bot_config.yaml", cfg_yaml)
+    return buf.getvalue()
+
+
+def test_webui_import_zip(client):
+    c, bot = client
+    payload = {"wxbot_export": 2,
+               "member_profiles": [{"grp": "111@chatroom", "wxid": "wxid_c",
+                                    "nickname": "老李", "profile": "老李画像"}],
+               "contact_memories": [], "mined_qa": []}
+    r = c.post("/knowledge/import",
+               data={"file": (io.BytesIO(_make_zip(payload)), "backup.zip")},
+               follow_redirects=True)
+    assert r.status_code == 200
+    assert bot.store.get_profile("111@chatroom", "wxid_c")["profile"] == "老李画像"
+
+
+def test_webui_import_zip_restore_cfg(client):
+    c, bot = client
+    payload = {"wxbot_export": 2, "member_profiles": [], "contact_memories": [],
+               "mined_qa": []}
+    old_cfg = open(bot.cfg.path, encoding="utf-8").read()
+    r = c.post("/knowledge/import",
+               data={"file": (io.BytesIO(_make_zip(payload, cfg_yaml="app: {dry_run: true}\n")),
+                              "backup.zip"),
+                     "restore_cfg": "1"},
+               follow_redirects=True)
+    assert r.status_code == 200
+    assert open(bot.cfg.path, encoding="utf-8").read() == "app: {dry_run: true}\n"
+    assert bot.cfg.data["app"]["dry_run"] is True
+    # 还原现场，避免影响其它用例
+    with open(bot.cfg.path, "w", encoding="utf-8") as fh:
+        fh.write(old_cfg)
+    bot.cfg.reload()
+
+
+def test_webui_import_zip_without_cfg_entry(client):
+    c, bot = client
+    payload = {"wxbot_export": 2, "member_profiles": [], "contact_memories": [],
+               "mined_qa": []}
+    r = c.post("/knowledge/import",
+               data={"file": (io.BytesIO(_make_zip(payload)), "backup.zip"),
+                     "restore_cfg": "1"},
+               follow_redirects=True)
+    assert r.status_code == 200
+    assert "配置未恢复" in r.data.decode("utf-8")
+
+
 def test_webui_import_bad_file(client):
     c, bot = client
     r = c.post("/knowledge/import",
@@ -192,3 +266,17 @@ def test_webui_import_bad_file(client):
                follow_redirects=True)
     assert r.status_code == 200
     assert bot.store.profiles_count() == 0
+    assert "导入失败" in r.data.decode("utf-8")
+
+
+def test_webui_import_zip_missing_knowledge(client):
+    c, bot = client
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("readme.txt", "hello")
+    r = c.post("/knowledge/import",
+               data={"file": (io.BytesIO(buf.getvalue()), "backup.zip")},
+               follow_redirects=True)
+    assert r.status_code == 200
+    assert bot.store.profiles_count() == 0
+    assert "导入失败" in r.data.decode("utf-8")

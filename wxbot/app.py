@@ -90,6 +90,8 @@ def run_gui(cfg_path=None):
     url = f"http://127.0.0.1:{shell.cfg.web_port}"
     try:
         import webview
+        # WebView2 默认静默取消 attachment 下载（导出按钮无反应的根因），必须显式放行
+        webview.settings["ALLOW_DOWNLOADS"] = True
         webview.create_window("微信智能助手", url,
                               width=1100, height=800, min_size=(860, 600))
         webview.start()

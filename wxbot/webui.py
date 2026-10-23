@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """Web 控制台（桌面窗口承载）：可视化配置（联系人/人设/群/模型/知识库）、状态、日志。"""
 import html
+import io
 import json
 import logging
 import threading
 import time
+import zipfile
 from urllib.parse import quote
 
 import yaml
@@ -725,11 +727,11 @@ details summary:hover{color:var(--primary)}
     <b style="white-space:nowrap">备份与迁移</b>
     <span class="muted" style="font-size:12px">换号迁移画像/记忆/问答，或整机备份（含配置）</span>
     <form method="get" action="/knowledge/export" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">
-      <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px" title="勾选后导出包包含 bot_config.yaml 原文（含 API 密钥，注意保管）"><input type="checkbox" name="cfg" value="1">含配置</label>
-      <button class="btn btn-sm btn-primary">⬇ 导出全部（JSON）</button>
+      <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px" title="勾选后压缩包内含 bot_config.yaml 原文（含 API 密钥，注意保管）"><input type="checkbox" name="cfg" value="1">含配置</label>
+      <button class="btn btn-sm btn-primary">⬇ 导出全部（ZIP）</button>
     </form>
     <form method="post" action="/knowledge/import" enctype="multipart/form-data" style="display:inline-flex;align-items:center;gap:6px">
-      <input type="file" name="file" accept=".json" required style="font-size:12px;max-width:200px">
+      <input type="file" name="file" accept=".zip,.json" required style="font-size:12px;max-width:200px">
       <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px"><input type="checkbox" name="overwrite" value="1">覆盖已有</label>
       <label style="font-size:12px;display:inline-flex;align-items:center;gap:4px" title="文件里带配置时才会恢复"><input type="checkbox" name="restore_cfg" value="1">恢复配置</label>
       <button class="btn btn-sm">⬆ 导入</button>
@@ -962,11 +964,12 @@ def start_web(bot):
 
     @app.route("/")
     def index():
-        _flash["msg"] = ""
-        return _render(p_grp=request.args.get("p_grp", ""),
+        page = _render(p_grp=request.args.get("p_grp", ""),
                        p_page=request.args.get("p_page", 1),
                        m_grp=request.args.get("m_grp", ""),
                        m_page=request.args.get("m_page", 1))
+        _flash["msg"] = ""
+        return page
 
     @app.post("/pause")
     def pause():
@@ -1326,11 +1329,14 @@ def start_web(bot):
             except OSError as e:
                 log.warning("读取配置用于备份失败: %s", e)
         data = bot.store.export_knowledge(
-            source_wxid=(bot.cfg.data.get("app") or {}).get("self_wxid") or "",
-            config_yaml=cfg_yaml)
-        body = json.dumps(data, ensure_ascii=False, indent=1)
-        fname = quote(time.strftime("wxbot_knowledge_%Y%m%d_%H%M%S.json"))
-        return Response(body, mimetype="application/json",
+            source_wxid=(bot.cfg.data.get("app") or {}).get("self_wxid") or "")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("knowledge.json", json.dumps(data, ensure_ascii=False, indent=1))
+            if cfg_yaml:
+                z.writestr("bot_config.yaml", cfg_yaml)
+        fname = quote(time.strftime("wxbot_backup_%Y%m%d_%H%M%S.zip"))
+        return Response(buf.getvalue(), mimetype="application/zip",
                         headers={"Content-Disposition":
                                  f"attachment; filename*=UTF-8''{fname}"})
 
@@ -1340,21 +1346,33 @@ def start_web(bot):
         overwrite = bool(request.form.get("overwrite"))
         restore_cfg = bool(request.form.get("restore_cfg"))
         try:
-            data = json.loads(f.read().decode("utf-8")) if f else None
+            raw = f.read() if f else b""
+            if raw[:2] == b"PK":
+                with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                    names = set(z.namelist())
+                    if "knowledge.json" not in names:
+                        raise ValueError("压缩包里没有 knowledge.json（请上传 wxbot 导出的备份包）")
+                    data = json.loads(z.read("knowledge.json").decode("utf-8"))
+                    cfg_yaml = (z.read("bot_config.yaml").decode("utf-8")
+                                if "bot_config.yaml" in names else "")
+            else:
+                data = json.loads(raw.decode("utf-8"))
+                cfg_yaml = str((data or {}).get("config_yaml") or "")
             if not isinstance(data, dict):
-                raise ValueError("文件内容不是有效的导出 JSON")
+                raise ValueError("文件内容不是有效的导出数据（JSON 或 ZIP）")
             counts = bot.store.import_knowledge(data, overwrite=overwrite)
             cfg_restored = False
-            if restore_cfg and data.get("config_yaml"):
+            if restore_cfg and cfg_yaml:
                 with open(bot.cfg.path, "w", encoding="utf-8") as fh:
-                    fh.write(str(data["config_yaml"]))
+                    fh.write(cfg_yaml)
                 bot.cfg.reload()
                 _hot_apply()
                 cfg_restored = True
         except Exception as e:
             _flash["msg"] = f"导入失败：{html.escape(str(e))}"
             return redirect("/")
-        msg = (f"导入完成：群友画像 {counts.get('profiles', 0)} 条、"
+        msg = (f"导入完成（文件 {f.filename or '?'}，{len(raw) / 1024:.0f} KB）："
+               f"群友画像 {counts.get('profiles', 0)} 条、"
                f"私聊记忆 {counts.get('memories', 0)} 条、"
                f"问答沉淀 {counts.get('mined_qa', 0)} 条、"
                f"待沉淀问题 {counts.get('qa_pending', 0)} 条、"
