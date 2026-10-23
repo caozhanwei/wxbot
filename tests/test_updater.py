@@ -160,7 +160,8 @@ def test_apply_update_writes_script_and_launches_detached(tmp_path, monkeypatch)
     args = launched["args"]
     assert args[0].lower().startswith("powershell") and script in args
     assert str(msi) in args and exe in args
-    assert launched["flags"] & 0x8  # DETACHED_PROCESS：升级器独立于主进程存活
+    # CREATE_NO_WINDOW(0x08000000)：DETACHED_PROCESS(0x8) 会让 powershell 静默退出不执行脚本
+    assert launched["flags"] == 0x08000000
 
 
 def test_apply_update_default_install_dir(tmp_path, monkeypatch, ):

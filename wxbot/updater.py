@@ -117,8 +117,9 @@ def apply_update(msi_path: str, exe_path=None) -> str:
     # utf-8-sig：PowerShell 5 靠 BOM 识别 UTF-8，中文路径才不会乱码
     with open(script, "w", encoding="utf-8-sig") as f:
         f.write(_UPDATER_PS)
-    flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # CREATE_NO_WINDOW：DETACHED_PROCESS 会让 powershell 这类控制台程序无控制台启动，
+    # 直接静默退出、脚本一行都不执行（实测，别改回 0x8）
     subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                       "-WindowStyle", "Hidden", "-File", script, msi_path, exe_path],
-                     creationflags=flags, close_fds=True)
+                     creationflags=0x08000000, close_fds=True)
     return script
