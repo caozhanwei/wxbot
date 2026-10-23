@@ -142,12 +142,20 @@ class PersonaEngine:
             log.warning("提炼联系人记忆失败: %s", e)
             return current_memory
 
-    def context_reply(self, persona_name, group, context_lines, kb_ref=""):
-        """免@主动接话：没被@时按群聊上下文自然回复，可并入知识库参考。"""
+    def context_reply(self, persona_name, group, context_lines, kb_ref="", active=False):
+        """免@主动接话：没被@时按群聊上下文自然回复，可并入知识库参考。
+
+        active=True（活跃分子模式）：接话姿态更放松，接梗/附议/补充/引申提问都行，
+        像真人群友一样自然参与，不做"只在值得帮忙时才说话"的束缚。
+        """
         p = self.cfg.persona(persona_name)
+        if active:
+            tone = ("你是这个群里的活跃分子，习惯每个话题都冒泡：接梗、附议、补充信息、"
+                    "引申提问都行，像真人群友一样自然参与。")
+        else:
+            tone = "你没有被@，是看到群里有值得帮忙的话题顺带接一句。"
         system = (f'你是微信群"{group}"里的助手。说话风格：{p.get("style")}。'
-                  f'背景：{p.get("background") or "帮群友答疑的技术助手"}。'
-                  "你没有被@，是看到群里有值得帮忙的话题顺带接一句。"
+                  f'背景：{p.get("background") or "帮群友答疑的技术助手"}。' + tone +
                   "只输出一条可直接发送的微信群文本：不要@任何人、不要解释、"
                   "不要引号、不要markdown，不超过 120 字；"
                   "没把握就直说不确定，别编造。")

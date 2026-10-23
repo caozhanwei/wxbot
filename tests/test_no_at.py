@@ -14,7 +14,7 @@ from wxbot.config import BotConfig
 GROUP = "111@chatroom"
 
 
-def _cfg_text(tmp_path, no_at=True):
+def _cfg_text(tmp_path, no_at=True, active=False):
     db = str(tmp_path / "t.db").replace("\\", "/")
     text = """
 app: {dry_run: true, db_file: "%s"}
@@ -26,9 +26,10 @@ groups:
     display: 老司机养成记
     enabled: true
     no_at_reply: %s
+    active: %s
     qa: {enabled: true, grounded_reply: true}
     manage: {welcome: false, forbidden_words: [], warn_persona: 群管家-热心, warn_threshold: 2}
-""" % (db, "true" if no_at else "false")
+""" % (db, "true" if no_at else "false", "true" if active else "false")
     return text
 
 
@@ -80,13 +81,19 @@ class FakeDriver:
 
 
 class FakeLLM:
-    def __init__(self, verdict=True, reply="NETLIST_FILE 指定网表输出路径，手册我发你"):
+    def __init__(self, verdict=True, reply="NETLIST_FILE 指定网表输出路径，手册我发你",
+                 sink_items=None):
         self.verdict = verdict
         self.reply = reply
+        self.sink_items = sink_items or []
         self.judged = 0
         self.chatted = 0
+        self.sink_seen = []
 
     def chat_json(self, system, user, temperature=0.1):
+        if "items" in system:                 # 沉淀抽取调用（_SINK_EXTRACT）
+            self.sink_seen.append(user)
+            return {"items": list(self.sink_items)}
         self.judged += 1
         return {"reply": self.verdict, "reason": "有人提问"}
 
@@ -112,13 +119,13 @@ class FakeKB:
 class FakeWriter:
     def __init__(self, fail=False):
         self.fail = fail
-        self.uploads = []
+        self.calls = []
 
-    def upload_markdown(self, title, markdown):
+    def add_qa(self, question, answer, context=""):
         if self.fail:
             from answer import KBError
-            raise KBError("HTTP 500: gateway down")
-        self.uploads.append((title, markdown))
+            raise KBError("kb_add_qa: HTTP 500")
+        self.calls.append((question, answer, context))
         return "ok"
 
 
@@ -147,18 +154,15 @@ def _logs(bot, kind):
 
 
 def test_no_at_triggers_reply_and_sinks(bot):
-    llm = FakeLLM()
+    llm = FakeLLM(sink_items=[{"q": "用户手册在哪", "a": "已发群里"}])
     bot.personas._llm = llm
     bot._on_group_msgs(_w(bot), [_msg("求一份用户手册")])
     assert llm.judged == 1 and llm.chatted == 1
     recs = _logs(bot, "no_at")
     assert len(recs) == 1 and "NETLIST_FILE" in recs[0]["detail"]
-    # 沉淀：3 行原始 → _SENSITIVE 滤掉卡号行 → 剩 2 条
-    assert len(bot._kb_writer.uploads) == 1
-    title, md = bot._kb_writer.uploads[0]
-    assert "老司机养成记" in title
-    assert "阿强" in md and "求一份用户手册" in md
-    assert "6222021234567890123" not in md and "老王" not in md
+    # 沉淀：LLM 抽问答 → kb_add_qa 入库；卡号行已在送模型前被滤掉
+    assert bot._kb_writer.calls == [("用户手册在哪", "已发群里", "来源群：老司机养成记")]
+    assert llm.sink_seen and "6222021234567890123" not in llm.sink_seen[0]
     # 回复前确实检索了知识库参考
     assert bot._kb.searched
     # 水位线推进；冷却已登记
@@ -190,14 +194,14 @@ def test_kb_failure_degrades_silently(bot):
             raise RuntimeError("kb down")
 
     bot._kb = Boom()
-    llm = FakeLLM()
+    llm = FakeLLM(sink_items=[{"q": "q1", "a": "a1"}])
     bot.personas._llm = llm
     bot._on_group_msgs(_w(bot), [_msg("求一份用户手册")])   # 不崩
     # KB 读写全挂：回复照发、无参考也作答
     assert llm.chatted == 1
     recs = _logs(bot, "no_at")
     assert len(recs) == 1 and "NETLIST_FILE" in recs[0]["detail"]
-    # 上传失败水位线不前移，留待下次重试
+    # 入库失败水位线不前移，留待下次重试
     assert bot.store.get_kb_seq(GROUP) == 0
 
 
@@ -236,4 +240,32 @@ def test_disabled_group_never_triggers(tmp_path):
     b.personas._llm = llm
     b._on_group_msgs(b.watch[0], [_msg("求一份用户手册")])
     assert llm.judged == 0
-    assert not b._kb_writer.uploads
+    assert not b._kb_writer.calls
+
+
+def test_active_mode_skips_judge_and_replies(tmp_path):
+    p = tmp_path / "bot_config.yaml"
+    p.write_text(_cfg_text(tmp_path, no_at=False, active=True), encoding="utf-8")
+    b = Bot(cfg=BotConfig(str(p)), with_web=False, driver=FakeDriver(_rows()))
+    b._kb = FakeKB()
+    b._kb_writer = FakeWriter()
+    b.build_watch()
+    llm = FakeLLM(verdict=False)             # 智能判定本会判“沉默”
+    b.personas._llm = llm
+    b._on_group_msgs(b.watch[0], [_msg("周末去哪玩")])
+    assert llm.judged == 0                   # 活跃分子：不做值不值得判定
+    assert llm.chatted == 1                  # 照样自然接话
+    assert len(_logs(b, "no_at")) == 1
+    assert b.store.get_kb_seq(GROUP) == 3    # 沉淀照跑（空抽取也推进水位）
+    assert b.state["no_at_last"][GROUP] > 0
+    # 冷却照常节流：冷却期内不再接话
+    b._on_group_msgs(b.watch[0], [_msg("还有呢", seq=11)])
+    assert llm.chatted == 1
+
+
+def test_active_skips_judge_even_with_no_at_on(bot):
+    llm = FakeLLM(verdict=False)
+    bot.watch[0]["cfg"]["active"] = True     # no_at_reply 与 active 同时开
+    bot.personas._llm = llm
+    bot._on_group_msgs(_w(bot), [_msg("哈哈哈")])
+    assert llm.judged == 0 and llm.chatted == 1

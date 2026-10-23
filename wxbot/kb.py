@@ -39,3 +39,10 @@ class KBGateway(McpKBClient):
             except KBError as e:
                 errs.append(tool + ": " + str(e))
         raise KBError("上传工具均不可用 → " + " | ".join(errs))
+
+    def add_qa(self, question, answer, context=""):
+        """写入一条问答知识（kb_add_qa，同库同问自动去重）；失败抛 KBError。"""
+        args = {"kb": self.kb, "question": question, "answer": answer}
+        if context:
+            args["context"] = context
+        return self._call_tool("kb_add_qa", args)

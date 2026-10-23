@@ -27,6 +27,14 @@ _NO_AT_JUDGE = (
     "或最后一条是机器人自己说的话。拿不准一律 false——宁可少说不刷屏。"
 )
 
+_SINK_EXTRACT = (
+    "你是知识库管理员，从群聊记录里提取“已形成明确答案”的问答知识对："
+    "有人提出具体问题，且对话里给出了明确、可复用的答案；"
+    "闲聊、寒暄、只有问题没有结论的一律不要。"
+    '只输出 JSON：{"items": [{"q": "问题(30字内)", "a": "答案(120字内)"}]}，'
+    "没有可提取的就输出空数组。"
+)
+
 
 def _num(v, default):
     try:
@@ -338,7 +346,7 @@ class Bot:
                 if word:
                     self._warn(w, m, word)
                     continue
-            if g.get("no_at_reply"):
+            if g.get("no_at_reply") or g.get("active"):
                 try:
                     self._no_at_reply(w, m)
                 except Exception as e:
@@ -473,16 +481,17 @@ class Bot:
         if not context:
             return
         self._sink_to_kb(w)
-        if not self._judge_no_at(w, context):
+        active = bool(w["cfg"].get("active"))
+        if not active and not self._judge_no_at(w, context):
             return
-        reply = self._no_at_answer(w, context)
+        reply = self._no_at_answer(w, context, active=active)
         if not reply:
             return
         if self.send(w["display"], reply, "no_at"):
             marks[w["user"]] = time.time()
 
     def _sink_to_kb(self, w):
-        """把上次水位线之后的新群消息（_SENSITIVE 过滤后）上传知识库；失败静默降级。"""
+        """把水位线后的新群消息（_SENSITIVE 过滤后）提炼成问答对写入知识库；失败静默降级待重试。"""
         from . import mining
         gid, gname = w["user"], w["display"]
         try:
@@ -498,12 +507,28 @@ class Bot:
             if len(lines) > _KB_SINK_MAX:
                 log.info("KB 沉淀积压 %d 条，只保留最近 %d 条", len(lines), _KB_SINK_MAX)
                 lines = lines[-_KB_SINK_MAX:]
-            title = f"{gname} 聊天沉淀 {time.strftime('%Y%m%d_%H%M')}"
-            md = ["# " + title, "", f"来源群：{gname}", ""]
-            md += ["- " + t["line"] for t in lines]
-            self.kb_writer.upload_markdown(title, "\n".join(md))
+            d = self.personas.llm.chat_json(
+                _SINK_EXTRACT, "来源群：" + gname + "\n"
+                + "\n".join(t["line"] for t in lines), temperature=0.0)
+            items = d.get("items") if isinstance(d, dict) else None
+            pushed = skipped = failed = 0
+            for it in items or []:
+                q = str((it or {}).get("q") or "").strip()
+                a = str((it or {}).get("a") or "").strip()
+                if not q or not a:
+                    skipped += 1
+                    continue
+                try:
+                    self.kb_writer.add_qa(q, a, context="来源群：" + gname)
+                    pushed += 1
+                except Exception as e:
+                    failed += 1
+                    log.warning("KB 问答入库失败(%s): %s %s", gname, q[:30], e)
+            if failed and not pushed:
+                raise RuntimeError("%d 条问答全部入库失败" % failed)
             self.store.set_kb_seq(gid, lines[-1]["seq"])
-            log.info("KB 沉淀 %s：%d 条", gname, len(lines))
+            log.info("KB 沉淀 %s：%d 行 → 入库 %d 条问答%s",
+                     gname, len(lines), pushed, "（本批无可沉淀）" if not pushed else "")
         except Exception as e:      # KBError 及其他：KB 挂了绝不阻断回复
             log.warning("KB 沉淀失败(%s)，跳过待下次重试: %s", gname, e)
 
@@ -523,7 +548,7 @@ class Bot:
             log.warning("免@判定失败(%s)，本次不接话: %s", w["display"], e)
             return False
 
-    def _no_at_answer(self, w, context):
+    def _no_at_answer(self, w, context, active=False):
         """生成免@回复，prompt 里并入知识库检索参考；检索失败就无参考作答。"""
         ref = ""
         try:
@@ -532,7 +557,8 @@ class Bot:
             log.warning("KB 检索失败(%s)，本次无参考作答: %s", w["display"], e)
         try:
             return self.personas.context_reply(
-                w["cfg"].get("persona", "群管家-热心"), w["display"], context, ref)
+                w["cfg"].get("persona", "群管家-热心"), w["display"], context, ref,
+                active=active)
         except Exception as e:
             log.warning("免@回复生成失败(%s): %s", w["display"], e)
             return ""

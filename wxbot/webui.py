@@ -484,9 +484,10 @@ details summary:hover{color:var(--primary)}
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
       <label><input type="checkbox" name="no_at_reply" {{ 'checked' if g.no_at_reply }}> 免@接话</label>
+      <label title="勾选后免@不再做“值不值得”智能判定，冷却一过就像群友一样自然接话，活跃气氛"><input type="checkbox" name="active" {{ 'checked' if g.active }}> 活跃分子</label>
       <label>参考上下文：<input type="number" name="no_at_context" value="{{ g.no_at_context or 20 }}" min="5" max="60" style="width:60px"> 条</label>
       <label>回复冷却：<input type="number" name="no_at_cooldown_min" value="{{ g.no_at_cooldown_min or 3 }}" step="0.1" min="0.1" style="width:60px"> 分钟</label>
-      <span class="muted" style="margin-left:auto">没人@也智能判断是否值得帮忙回复，冷却内不频繁打扰</span>
+      <span class="muted" style="margin-left:auto">免@=智能判断值得才接话；活跃分子=跳过判定，冷却到就接话</span>
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
       <label><input type="checkbox" name="welcome" {{ 'checked' if (g.manage or {}).get('welcome') }}> 进群欢迎语</label>
@@ -651,9 +652,15 @@ details summary:hover{color:var(--primary)}
       <button class="btn btn-sm btn-danger" name="mode" value="full" onclick="return confirm('全量会重读整个群历史并调用模型，群很大时要跑几分钟，继续？')">全量挖掘</button>
     </form>
     {% endfor %}
-    <form method="post" action="/mine/export" style="margin-left:auto">
-      <button class="btn btn-primary">导出全部为 Markdown</button>
-    </form>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <form method="post" action="/kb/push_mined">
+        <input type="hidden" name="grp" value="{{ m_grp }}">
+        <button class="btn btn-primary" title="把本地挖掘的问答对批量写入团队知识库（kb_add_qa 同问自动去重，可重复点按）">同步问答入库</button>
+      </form>
+      <form method="post" action="/mine/export">
+        <button class="btn">导出全部为 Markdown</button>
+      </form>
+    </div>
   </div>
 
   <div class="chip-group">
@@ -1089,6 +1096,7 @@ def start_web(bot):
                        "warn_threshold": int(f.get("warn_threshold") or 2)},
         }
         data["no_at_reply"] = bool(f.get("no_at_reply"))
+        data["active"] = bool(f.get("active"))
         for key, cast in (("no_at_context", int), ("no_at_cooldown_min", float)):
             raw = (f.get(key) or "").strip()
             if raw:
@@ -1373,6 +1381,30 @@ def start_web(bot):
         _flash["msg"] = (f"已开始提炼【{c.get('display') or c.get('id')}】的私聊长期记忆"
                          "（后台运行，完成后自动生效）" if ok
                          else "已有提炼任务在跑，稍后再试")
+        return redirect("/")
+
+    @app.post("/kb/push_mined")
+    def kb_push_mined():
+        """把本地挖掘问答库批量写入团队知识库（kb_add_qa，同问自动去重）。"""
+        inner = getattr(bot, "_bot", None) or bot
+        grp = (request.form.get("grp") or "").strip()
+        try:
+            limit = min(2000, max(1, int(request.form.get("limit") or 1000)))
+        except ValueError:
+            limit = 1000
+        rows = inner.store.mined_pairs(grp=grp or None, limit=limit)
+        ok = fail = 0
+        for r in rows:
+            try:
+                inner.kb_writer.add_qa(r.get("question") or "", r.get("answer") or "",
+                                       context="来源群：" + (r.get("grp") or grp or ""))
+                ok += 1
+            except Exception:
+                fail += 1
+        msg = f"问答入库：成功 {ok} 条"
+        if fail:
+            msg += f"，失败 {fail} 条（网关正常后可重按，同问自动去重不会重复）"
+        _flash["msg"] = msg
         return redirect("/")
 
     @app.post("/config")
