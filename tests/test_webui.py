@@ -128,6 +128,17 @@ def test_index_renders(client):
         assert s in body, f"页面缺少 {s}"
 
 
+def test_tasks_card_and_delete(client):
+    c, bot, path = client
+    bot.store.add_task("111@chatroom", "测试群", 21, 0, "总结今天群里的消息",
+                       created_by="wxid_admin", created_by_name="管理员")
+    body = c.get("/").data.decode("utf-8")
+    assert "每天 21:00" in body and "总结今天群里的消息" in body
+    tid = bot.store.list_tasks()[0]["id"]
+    c.post("/tasks/delete", data={"id": str(tid)}, follow_redirects=True)
+    assert bot.store.list_tasks() == []
+
+
 def test_contact_new_save_del(client):
     c, bot, path = client
     r = c.post("/cfg/contact", data={"action": "new", "display": "李四",

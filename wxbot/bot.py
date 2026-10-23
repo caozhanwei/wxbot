@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """主编排：轮询所有已配置聊天 → 私聊人设回复 / 群答疑 / 群管理 / 管理员命令。"""
 import logging
+import queue
 import random
 import threading
 import time
 
 from answer import McpKBClient, KBError
 
-from . import group_logic, paths
+from . import group_logic, paths, personas
 from .kb import KBGateway
 from .config import BotConfig
 from .driver import WxDriver
@@ -15,6 +16,8 @@ from .personas import PersonaEngine
 from .store import Store
 
 log = logging.getLogger("wxbot")
+
+POLL_SEC_DEFAULT = 1.5   # 轮询间隔默认值（SQLCipher 增量读很轻，不必等 3 秒）
 
 _KB_SINK_MAX = 200       # 免@沉淀单次上传的最大消息条数（积压再多只保留最近这些）
 
@@ -163,17 +166,6 @@ class Bot:
         else:
             log.warning("引用发送失败 → %s: %s", display, why)
         return ok
-        if self.cfg.dry_run:
-            log.info("[dry-quote] → %s (@%s): %s", display, target_name, text[:60])
-            self._last_sent_cache[display] = (text, time.time())
-            return True
-        ok, why = self.driver.send_quote(display, text, target_name=target_name, target_content=target_content)
-        if ok:
-            self.state["sent"] += 1
-            self._last_sent_cache[display] = (text, time.time())
-        else:
-            log.warning("引用发送失败 → %s: %s", display, why)
-        return ok
 
     def notify_admins(self, text):
         for a in self.cfg.admins:
@@ -220,7 +212,8 @@ class Bot:
                 else:
                     self._on_group_msgs(w, msgs)
             self._maybe_auto_mine()
-            time.sleep(float(rc.get("poll_sec", 3)))
+            self._maybe_run_tasks()
+            time.sleep(float(rc.get("poll_sec", POLL_SEC_DEFAULT)))
 
     def _maybe_auto_mine(self):
         """配置了 mine 的群，定时增量挖掘历史入本地知识池。"""
@@ -337,7 +330,9 @@ class Bot:
                 continue
             if self.state["paused"]:
                 continue
-            if qa.get("enabled") and group_logic.at_bot(m["content"], names):
+            at_me = group_logic.at_bot(m["content"], names) or \
+                self.driver.self_id in (m.get("at_users") or [])
+            if qa.get("enabled") and at_me:
                 self._group_qa(w, m)      # @机器人：原有答疑链路，不受免@冷却限制
                 continue
             word = None
@@ -363,11 +358,20 @@ class Bot:
         names = self.driver.mention_names(g)
         raw_msg_content = m.get("content") or ""
         question = group_logic.strip_at(raw_msg_content, names)
+        if question == raw_msg_content.strip() and \
+                self.driver.self_id in (m.get("at_users") or []):
+            # 按称呼没剥掉 @（群名片≠微信昵称），又确认本机被 @：剥首个 @ 前缀
+            question = group_logic.strip_generic_at(question)
         asker = m["sender_display"] or m["sender"]
         if not question:
             self.send_quote(w["display"], "在呢在呢，有事直接说哈 [呲牙]",
                             target_name=asker, target_content=raw_msg_content)
             return
+        try:
+            if self._maybe_task_command(w, m, question):
+                return
+        except Exception as e:
+            log.warning("任务指令处理异常(%s): %s", w["display"], e)
         rc = self.cfg.reply_cfg
         try:
             profile = (self.store.get_profile(w["user"], m["sender"]) or {}).get("profile") or ""
@@ -379,6 +383,15 @@ class Bot:
         except Exception:
             self_profile = ""
         standalone, should = question, True
+        # 提速①：KB 预取与提问理解并行（问题多数已独立，二者通常等价）
+        kb_box = queue.Queue()
+
+        def _prefetch():
+            try:
+                kb_box.put(self.kb.ask(question, w["display"]))
+            except Exception as e:
+                kb_box.put(e)
+        threading.Thread(target=_prefetch, daemon=True).start()
         try:
             ctx = self.driver.build_context(w["user"], int(rc.get("history_limit", 16)))
             u = self.personas.understand_question(w["display"], ctx, question, asker, profile)
@@ -390,13 +403,24 @@ class Bot:
         self._refresh_profile_async(w, m["sender"], asker)
         if not should:
             # 闲聊/玩笑/打趣@机器人：接地气幽默接话，坚决拒绝死板客服模板
-            casual = self.personas.casual_group_reply(
-                g.get("persona", "通用朋友"), w["display"], ctx, asker, question,
-                profile=profile, self_profile=self_profile)
-            self.send_quote(w["display"], casual, target_name=asker, target_content=raw_msg_content)
+            casual = self._diversified(
+                w["display"],
+                lambda avoid: self.personas.casual_group_reply(
+                    g.get("persona", "通用朋友"), w["display"], ctx, asker, question,
+                    profile=profile, self_profile=self_profile, avoid_lines=avoid),
+                "闲聊接话")
+            if casual:
+                self.send_quote(w["display"], casual, target_name=asker, target_content=raw_msg_content)
             return
         try:
-            answer, hit, grounded = self.kb.ask(standalone, w["display"])
+            if standalone == question:
+                pre = kb_box.get(timeout=180)   # 预取已在路上，等它回来即可
+                if isinstance(pre, Exception):
+                    raise KBError(str(pre))
+                answer, hit, grounded = pre
+            else:
+                # 改写成了不同的独立问题：预取作废，按独立问题重查
+                answer, hit, grounded = self.kb.ask(standalone, w["display"])
         except KBError as e:
             log.warning("KB 调用失败: %s", e)
             if time.time() - self.state["kb_fail_ts"] > 600:
@@ -409,7 +433,8 @@ class Bot:
                     reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                        w["display"], ctx, standalone,
                                                        asker, profile=profile,
-                                                       self_profile=self_profile)
+                                                       self_profile=self_profile,
+                                                       avoid_lines=self._recent_replies(w["display"]))
                     self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
                 except Exception as ee:
                     log.warning("LLM 兜底也失败: %s", ee)
@@ -422,18 +447,161 @@ class Bot:
             reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                w["display"], ctx, standalone,
                                                asker, profile=profile, kb_ref=answer,
-                                               self_profile=self_profile)
+                                               self_profile=self_profile,
+                                               avoid_lines=self._recent_replies(w["display"]))
             self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
         else:
             self.store.add_qa_pending(w["display"], asker, standalone)
             reply = self.personas.group_answer(g.get("persona", "通用朋友"),
                                                w["display"], ctx, standalone,
                                                asker, profile=profile,
-                                               self_profile=self_profile)
+                                               self_profile=self_profile,
+                                               avoid_lines=self._recent_replies(w["display"]))
             if not reply:
                 reply = "这个我手头暂时没查到准确资料，已帮你记下反馈给群里小伙伴啦～"
             self.send_quote(w["display"], reply, target_name=asker, target_content=raw_msg_content)
             self.notify_admins(f"[待沉淀] {w['display']} {asker}: {standalone[:80]}")
+
+    def _recent_replies(self, display, limit=6):
+        """本会话近期机器人已发出的文本（最新在前），供多样性判定与 prompt 注入。"""
+        out = []
+        try:
+            for r in self.store.recent_logs(120):
+                if r.get("kind") in ("reply", "no_at", "qa") and r.get("chat") == display:
+                    t = str(r.get("detail") or "").strip()
+                    if t:
+                        out.append(t)
+                        if len(out) >= limit:
+                            break
+        except Exception as e:
+            log.warning("读取近期回复失败(%s): %s", display, e)
+        return out
+
+    def _diversified(self, display, gen, label):
+        """gen(avoid_lines) → 文本；与近期已发换皮重复时带更强清单重试一次，仍重复则沉默。"""
+        recent = self._recent_replies(display)
+        text = gen(recent)
+        if not text:
+            return None
+        if not personas.too_similar(text, recent):
+            return text
+        retry = gen(recent + [text])
+        if retry and not personas.too_similar(retry, recent + [text]):
+            return retry
+        log.info("%s重复拦截 → %s: %s", label, display, (text or "")[:40])
+        return None
+
+    # ---------- 群定时任务（群主/管理员 @机器人 固化指令） ----------
+    _TASK_KEYWORDS = ("总结", "提醒", "定时", "每天", "每周", "任务", "几点", "取消", "固定")
+
+    def _task_admin_ids(self, gid):
+        ids = {a for a in (self.cfg.admins or []) if a}
+        owner = self.driver.chat_owner(gid) if hasattr(self.driver, "chat_owner") else ""
+        if owner:
+            ids.add(owner)
+        return ids
+
+    def _maybe_task_command(self, w, m, question=None):
+        """群主/管理员的 @消息若是定时任务指令则处理并返回 True，否则返回 False 走原答疑。"""
+        if question is None:
+            question = group_logic.strip_at(m.get("content") or "",
+                                            self.driver.mention_names(w["cfg"]))
+        if not question:
+            return False
+        if m.get("sender") not in self._task_admin_ids(w["user"]):
+            return False
+        if not any(k in question for k in self._TASK_KEYWORDS):
+            return False
+        try:
+            parsed = self.personas.parse_task_command(question)
+        except Exception as e:
+            log.warning("任务指令解析失败(%s): %s", w["display"], e)
+            return False
+        if not parsed.get("is_task"):
+            return False
+        self._handle_task_cmd(w, m, parsed)
+        return True
+
+    def _handle_task_cmd(self, w, m, parsed):
+        action = parsed.get("action")
+        asker = m.get("sender_display") or m.get("sender") or "管理"
+        raw = m.get("content") or ""
+        if action == "list":
+            tasks = self.store.list_tasks(w["user"])
+            if not tasks:
+                self.send_quote(w["display"], "现在这个群还没有定时任务哈",
+                                target_name=asker, target_content=raw)
+                return
+            lines = [f"{i}. 每天 {int(t['hour']):02d}:{int(t['minute']):02d} "
+                     f"{t['instruction']}（来自 {t.get('created_by_name') or '管理'}）"
+                     for i, t in enumerate(tasks, 1)]
+            self.send_quote(w["display"], "当前定时任务：\n" + "\n".join(lines),
+                            target_name=asker, target_content=raw)
+            return
+        if action == "cancel":
+            tasks = self.store.list_tasks(w["user"])
+            idx = max(1, int(parsed.get("index") or 1))
+            if not tasks or idx > len(tasks):
+                self.send_quote(w["display"],
+                                "没找到这个任务，先发「看看现在的定时任务」我列给你",
+                                target_name=asker, target_content=raw)
+                return
+            t = tasks[idx - 1]
+            self.store.remove_task(t["id"])
+            self.send_quote(w["display"],
+                            f"已取消：每天 {int(t['hour']):02d}:{int(t['minute']):02d} "
+                            f"{t['instruction']}",
+                            target_name=asker, target_content=raw)
+            return
+        # create
+        hour = int(parsed.get("hour", 21))
+        minute = int(parsed.get("minute", 0))
+        desc = parsed.get("desc") or "定时任务"
+        self.store.add_task(w["user"], w["display"], hour, minute, desc,
+                            created_by=m.get("sender", ""),
+                            created_by_name=asker)
+        self.send_quote(
+            w["display"],
+            f"好嘞，已固化：每天 {hour:02d}:{minute:02d} 我会在群里发【{desc}】，"
+            "到点叫大家 [呲牙]",
+            target_name=asker, target_content=raw)
+
+    def _maybe_run_tasks(self):
+        """每 30 秒巡检一次到期的定时任务，后台线程执行。"""
+        if time.time() - self.state.get("last_task_check", 0) < 30:
+            return
+        self.state["last_task_check"] = time.time()
+        for t in self.store.due_tasks():
+            w = next((x for x in self.watch if x["user"] == t.get("grp")), None)
+            if not w:
+                continue
+            self.store.mark_run(t["id"])
+            log.info("定时任务触发 %s %02d:%02d: %s", t.get("grp_name"),
+                     int(t.get("hour") or 0), int(t.get("minute") or 0),
+                     (t.get("instruction") or "")[:40])
+            threading.Thread(target=self._run_task, args=(w, t), daemon=True).start()
+
+    def _run_task(self, w, t):
+        """执行一个定时任务（v1：近 24h 群消息按指令总结播报）。"""
+        from . import mining
+        try:
+            rows = self.driver.db.get_messages(w["user"], limit=800) or []
+            cutoff = time.time() - 24 * 3600
+            rows = [r for r in rows
+                    if (r.get("create_time") or 0) >= cutoff and r.get("sender_username")]
+            lines = [x["line"] for x in mining._normalize(self.driver, rows)]
+            lines = lines[-300:]
+            if not lines:
+                self.send(w["display"], "过去24小时群里挺安静，没什么要播报的～", "reply")
+                return
+            text = self.personas.summarize_day(
+                w["display"], lines, t.get("instruction") or "总结今天群里的消息")
+            if not text:
+                raise RuntimeError("总结为空")
+            self.send(w["display"], text, "reply")
+        except Exception as e:
+            log.warning("定时任务执行失败(%s): %s", t.get("grp_name"), e)
+            self.notify_admins(f"[告警] 定时任务执行失败 {t.get('grp_name')}: {e}")
 
     def _refresh_profile_async(self, w, wxid, nickname):
         """后台线程更新提问者画像，LLM 慢也不挡主循环。"""
@@ -484,7 +652,10 @@ class Bot:
         active = bool(w["cfg"].get("active"))
         if not active and not self._judge_no_at(w, context):
             return
-        reply = self._no_at_answer(w, context, active=active)
+        reply = self._diversified(
+            w["display"],
+            lambda avoid: self._no_at_answer(w, context, active=active, avoid=avoid),
+            "免@接话")
         if not reply:
             return
         if self.send(w["display"], reply, "no_at"):
@@ -548,7 +719,7 @@ class Bot:
             log.warning("免@判定失败(%s)，本次不接话: %s", w["display"], e)
             return False
 
-    def _no_at_answer(self, w, context, active=False):
+    def _no_at_answer(self, w, context, active=False, avoid=None):
         """生成免@回复，prompt 里并入知识库检索参考；检索失败就无参考作答。"""
         ref = ""
         try:
@@ -558,7 +729,7 @@ class Bot:
         try:
             return self.personas.context_reply(
                 w["cfg"].get("persona", "群管家-热心"), w["display"], context, ref,
-                active=active)
+                active=active, avoid_lines=avoid)
         except Exception as e:
             log.warning("免@回复生成失败(%s): %s", w["display"], e)
             return ""

@@ -41,6 +41,36 @@ def strip_at(text, names):
     return text.strip()
 
 
+_ATUSERLIST = re.compile(r"<atuserlist><!\[CDATA\[(.*?)\]\]></atuserlist>")
+
+
+def parse_atuserlist(source):
+    """从 msgsource XML 提取被 @ 的 wxid 列表（微信写入的精确名单）。
+
+    群成员 @ 机器人时正文用的是群名片名，与微信昵称（mention_names）可能
+    不同，文本匹配会漏；atuserlist 直接给出被 @ 者的 wxid，无歧义。
+    """
+    if not source:
+        return []
+    if isinstance(source, bytes):
+        try:
+            source = source.decode("utf-8", "ignore")
+        except Exception:
+            return []
+    m = _ATUSERLIST.search(source)
+    if not m:
+        return []
+    return [u for u in m.group(1).split(",") if u]
+
+
+_GENERIC_AT = re.compile(r"^@[^\s :]{1,32}[\s :]*")
+
+
+def strip_generic_at(text):
+    """剥掉开头第一处 @提及 前缀（称呼未知时用；仅在确认被 @ 时调用）。"""
+    return _GENERIC_AT.sub("", text or "", count=1).strip()
+
+
 def join_name(content):
     """系统消息中的进群者昵称，非进群消息返回 None。"""
     for pat in _JOIN_PATTERNS:

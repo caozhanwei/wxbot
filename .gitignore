@@ -31,3 +31,4 @@ build/*
 !build/product.wxs
 !build/app.ico
 .git_disabled/
+dist-release/

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """SQLite 存储：运行日志、劝告计数、待沉淀问题、审计。"""
+import datetime as _dt
 import logging
 import sqlite3
 import threading
@@ -35,6 +36,12 @@ CREATE TABLE IF NOT EXISTS contact_memories(
 CREATE TABLE IF NOT EXISTS pending_issues(
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, grp TEXT,
     asker TEXT, question TEXT, context TEXT, status TEXT DEFAULT 'pending');
+CREATE TABLE IF NOT EXISTS group_tasks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, grp TEXT, grp_name TEXT,
+    freq TEXT DEFAULT 'daily', hour INTEGER, minute INTEGER,
+    instruction TEXT, enabled INTEGER DEFAULT 1,
+    created_by TEXT, created_by_name TEXT, created_ts REAL,
+    last_run REAL DEFAULT 0);
 """
 
 
@@ -173,13 +180,62 @@ class Store:
         with self._conn() as c:
             return c.execute(q, ((grp,) if grp else ())).fetchone()["n"]
 
+    # ---------- 群定时任务（群主/管理员 @机器人 固化指令） ----------
+    def add_task(self, grp, grp_name, hour, minute, instruction,
+                 created_by="", created_by_name="", freq="daily"):
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO group_tasks(grp, grp_name, freq, hour, minute, "
+                "instruction, created_by, created_by_name, created_ts) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (grp, grp_name, freq, int(hour), int(minute),
+                 str(instruction)[:500], created_by, created_by_name, time.time()))
+            return cur.lastrowid
+
+    def list_tasks(self, grp=None):
+        q = ("SELECT * FROM group_tasks WHERE enabled=1"
+             + (" AND grp=?" if grp else "") + " ORDER BY id")
+        with self._conn() as c:
+            rows = c.execute(q, ((grp,) if grp else ())).fetchall()
+            return [dict(r) for r in rows]
+
+    def remove_task(self, tid):
+        with self._lock, self._conn() as c:
+            c.execute("DELETE FROM group_tasks WHERE id=?", (tid,))
+
+    def mark_run(self, tid, ts=None):
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE group_tasks SET last_run=? WHERE id=?",
+                      (time.time() if ts is None else ts, tid))
+
+    def due_tasks(self, now=None):
+        """已到今天定时点且当天尚未运行的任务。
+
+        每日任务以「当天 HH:MM 槽」为基准：now 早于槽点不触发；过了槽点且
+        last_run 还停在槽点之前、且任务创建早于槽点（创建当天 22:00 的 21:00
+        任务等到明天才首发）→ 到期，当天只跑一次。
+        """
+        now = time.time() if now is None else now
+        dt = _dt.datetime.fromtimestamp(now)
+        out = []
+        for t in self.list_tasks():
+            hour, minute = int(t.get("hour") or 0), int(t.get("minute") or 0)
+            slot = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if slot.timestamp() > now:
+                continue                     # 今天的点还没到
+            if float(t.get("last_run") or 0) >= slot.timestamp():
+                continue                     # 槽点后已跑过
+            if float(t.get("created_ts") or 0) >= slot.timestamp():
+                continue                     # 槽点后才创建的，明天首发
+            out.append(t)
+        return out
+
     # ---------- 成员画像 ----------
     def get_profile(self, grp, wxid):
         with self._conn() as c:
             row = c.execute("SELECT * FROM member_profiles WHERE grp=? AND wxid=?",
                             (grp, wxid)).fetchone()
             return dict(row) if row else None
-
     def upsert_profile(self, grp, wxid, nickname, profile):
         with self._lock, self._conn() as c:
             c.execute(

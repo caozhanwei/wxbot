@@ -181,6 +181,10 @@ class WxDriver:
                 item["quoted_content"] = ref["quoted_content"]
                 if ref["reply"]:
                     item["content"] = ref["reply"]
+            if is_group:
+                # msgsource 里的 atuserlist 是微信写入的被 @ 精确名单，
+                # 比正文文本匹配可靠（群名片≠微信昵称时文本匹配必漏）
+                item["at_users"] = group_logic.parse_atuserlist(m.get("source"))
             item["sender_display"] = self.display_of(item["sender"]) if item["sender"] else ""
             out.append(item)
         return out, since
@@ -189,6 +193,13 @@ class WxDriver:
         names = [self.self_name] + list((group_cfg.get("manage") or {}).get("mention_names")
                                         or group_cfg.get("mention_names") or [])
         return [n for n in dict.fromkeys(names) if n]
+
+    def chat_owner(self, gid):
+        """群主 wxid（定时任务等权限判断用）；查不到返回空串。"""
+        try:
+            return self.db.get_room_owner(gid) or ""
+        except Exception:
+            return ""
 
     # ---------- 上下文 ----------
     def build_context(self, user_id, limit=16, speaker_map=None):

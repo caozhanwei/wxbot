@@ -99,7 +99,8 @@ class FakeLLM:
 
     def chat(self, system, user, temperature=0.8):
         self.chatted += 1
-        return self.reply
+        # 真实 LLM 措辞每次都明显不同（多样性拦截依赖这一点）
+        return self.reply if self.chatted == 1 else "我整理下稍后发你一份完整手册哈"
 
 
 class FakeKB:

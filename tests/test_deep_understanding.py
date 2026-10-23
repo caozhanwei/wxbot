@@ -114,7 +114,8 @@ def test_llm_empty_content_retries_then_ok():
         post.side_effect = [empty, good]
         assert llm.chat("s", "u") == "答案"
     assert post.call_count == 2
-    assert post.call_args.kwargs["json"]["max_tokens"] == 2000
+    # 重试预算翻倍：小预算被 reasoning 吃空后，同预算重试大概率还空
+    assert post.call_args.kwargs["json"]["max_tokens"] == 4000
 
 
 def test_llm_empty_content_gives_up():

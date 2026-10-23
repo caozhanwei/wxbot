@@ -84,6 +84,46 @@ def clean_ai_markers(text: str) -> str:
     return t.strip()
 
 
+def _bigrams(s: str) -> set:
+    s = re.sub(r"\s+", "", s or "")
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def too_similar(text: str, others, thresh: float = 0.55) -> bool:
+    """与近期任一已发回复的字符二元组 Jaccard 过高 → 判定为换皮重复。
+
+    短文本（<6 字，如"哈哈"）天然高重合不拦；表情/标点差异挡不住二元组重合，
+    正好覆盖"只换个表情再说一遍"的线上事故形态。
+    """
+    t = (text or "").strip()
+    if len(t) < 6:
+        return False
+    bg = _bigrams(t)
+    if not bg:
+        return False
+    for o in others or []:
+        o = (o or "").strip()
+        if len(o) < 6:
+            continue
+        og = _bigrams(o)
+        if og and len(bg & og) / len(bg | og) >= thresh:
+            return True
+    return False
+
+
+_AVOID_NOTE = ("\n\n你最近在本群已发过下面这些话，禁止重复其中任何一句的措辞、"
+               "句式或梗，换完全不同的角度和说法：\n")
+
+
+def avoid_block(avoid_lines) -> str:
+    """把近期已发话术整成 prompt 禁止清单；空清单返回空串。"""
+    lines = [str(x or "").strip() for x in (avoid_lines or [])]
+    lines = [x for x in lines if x][:8]
+    if not lines:
+        return ""
+    return _AVOID_NOTE + "\n".join("- " + x[:80] for x in lines)
+
+
 class PersonaEngine:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -142,7 +182,8 @@ class PersonaEngine:
             log.warning("提炼联系人记忆失败: %s", e)
             return current_memory
 
-    def context_reply(self, persona_name, group, context_lines, kb_ref="", active=False):
+    def context_reply(self, persona_name, group, context_lines, kb_ref="", active=False,
+                      avoid_lines=None):
         """免@主动接话：没被@时按群聊上下文自然回复，可并入知识库参考。
 
         active=True（活跃分子模式）：接话姿态更放松，接梗/附议/补充/引申提问都行，
@@ -163,9 +204,61 @@ class PersonaEngine:
         if kb_ref:
             user += ("\n\n知识库检索到的参考资料（可信时优先依据，与对话无关就忽略）：\n"
                      + kb_ref[:1200])
+        user += avoid_block(avoid_lines)
         user += "\n\n请生成你要发出的接话："
         temp = float(self.cfg.llm_cfg.get("temperature", 0.8))
         raw = self.llm.chat(system, user, temperature=temp)
+        return _sanitize(raw)
+
+    def parse_task_command(self, text):
+        """解析群主/管理员的定时任务指令 → {"is_task", "action", "freq", "hour", "minute", "desc", "index"}。
+
+        非任务指令返回 {"is_task": False}；解析失败抛异常由调用方降级。
+        """
+        system = (
+            "你是微信群助手的任务解析器。群管理/群主会对机器人说想让它固定干的事"
+            "（比如每天定时总结群消息、定时发提醒）。判断这句话是不是这样的指令。"
+            '只输出 JSON：{"is_task": true或false, "action": "create"或"list"或"cancel", '
+            '"freq": "daily", "hour": 0到23, "minute": 0到59, '
+            '"desc": "要干什么的一句话", "index": 取消第几个任务(从1起，不确定为1)}。'
+            "时间换算：晚上9点=21、早上8点=8、中午12点半=12:30、早上7点半=7:30；"
+            "没说具体时间的 create → hour=21, minute=0 并在 desc 里说明待定。"
+            "看任务/列出任务 → list；取消任务/别再发了 → cancel。"
+            '不是任务指令（普通提问、闲聊）→ {"is_task": false}。'
+        )
+        d = self.llm.chat_json(system, text, temperature=0.0)
+        if not isinstance(d, dict):
+            return {"is_task": False}
+        if not d.get("is_task"):
+            return {"is_task": False}
+        try:
+            hour = int(d.get("hour"))
+            minute = int(d.get("minute"))
+        except (TypeError, ValueError):
+            hour, minute = 21, 0
+        return {
+            "is_task": True,
+            "action": str(d.get("action") or "create"),
+            "freq": "daily",
+            "hour": min(23, max(0, hour)),
+            "minute": min(59, max(0, minute)),
+            "desc": str(d.get("desc") or "").strip() or "定时任务",
+            "index": max(1, int(d.get("index") or 1)),
+        }
+
+    def summarize_day(self, group, lines, instruction):
+        """每日群消息总结：把最近 24h 群聊压成要点播报。"""
+        p = self.cfg.persona("通用朋友")
+        system = (
+            f'你是微信群"{group}"里的助手，正在做群友托付的每日播报。'
+            f"说话风格：{p.get('style') or '简洁清楚、接地气'}。"
+            "把这段群聊整理成适合发群里的总结：分要点、口语化、不啰嗦；"
+            "重要通知/结论放前面，有人提出但没解决的事单独列出来；"
+            "不要@任何人，不要编造群里没说的内容，300字以内。"
+            "只输出可直接发送的微信文本，不要标题符号、不要markdown。"
+        )
+        user = f"群：{group}\n任务要求：{instruction}\n\n群聊记录：\n" + "\n".join(lines)
+        raw = self.llm.chat(system, user, temperature=0.5)
         return _sanitize(raw)
 
     def understand_question(self, group, context_lines, question, asker, profile=""):
@@ -191,7 +284,7 @@ class PersonaEngine:
         return {"standalone": standalone, "should_answer": bool(d.get("should_answer", True))}
 
     def group_answer(self, persona_name, group, context_lines, question,
-                     asker, profile="", kb_ref="", self_profile=""):
+                     asker, profile="", kb_ref="", self_profile="", avoid_lines=None):
         """@提问的群内回答：结合上下文与双方画像，像真人接话一样答，可引用群友观点。"""
         p = self.cfg.persona(persona_name)
         system = (f'你是微信群"{group}"里的助手（有人@你提问）。'
@@ -210,12 +303,14 @@ class PersonaEngine:
         if kb_ref:
             user += ("\n\n知识库检索到的参考资料（可信时优先依据，与问题无关就忽略）：\n"
                      + kb_ref[:1200])
+        user += avoid_block(avoid_lines)
         user += "\n\n请生成你的回答："
         temp = float(self.cfg.llm_cfg.get("temperature", 0.8))
         raw = self.llm.chat(system, user, temperature=temp)
         return _sanitize(raw)
 
-    def casual_group_reply(self, persona_name, group, context_lines, asker, question, profile="", self_profile=""):
+    def casual_group_reply(self, persona_name, group, context_lines, asker, question,
+                           profile="", self_profile="", avoid_lines=None):
         """群聊闲聊、调侃、玩笑或纯@时的拟人回复：拒绝死板机器人话术，幽默机智接地气。"""
         p = self.cfg.persona(persona_name)
         system = (
@@ -233,6 +328,7 @@ class PersonaEngine:
         if self_profile:
             user += f"\n你本人的画像（保持一致的说话习惯）：{self_profile}"
         user += ("\n最近群聊对话：\n" + "\n".join(context_lines[-8:])
+                 + avoid_block(avoid_lines)
                  + f"\n\n对方说：{question}\n你的接话：")
         try:
             temp = float(self.cfg.llm_cfg.get("temperature", 0.85))

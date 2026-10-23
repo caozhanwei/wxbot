@@ -534,7 +534,7 @@ details summary:hover{color:var(--primary)}
   <form method="post" action="/cfg/app" class="row" style="padding:10px 0;border-top:1px dashed var(--border)">
     <input type="hidden" name="scope" value="run">
     <label class="badge {{ 'badge-warning' if dry_run else 'badge-success' }}"><input type="checkbox" name="dry_run" {{ 'checked' if dry_run }}> 演示模式（只记日志不发微信）</label>
-    <label>轮询周期：<input type="number" name="poll_sec" value="{{ reply.poll_sec or 3 }}" style="width:55px"> 秒</label>
+    <label>轮询周期：<input type="number" name="poll_sec" value="{{ reply.poll_sec or 1.5 }}" style="width:55px"> 秒</label>
     <label>合并连发：<input type="number" name="quiesce_sec" value="{{ reply.quiesce_sec or 5 }}" style="width:55px"> 秒</label>
     <label>拟人迟延：<input type="number" name="hd_min" value="{{ (reply.human_delay or [2,5])[0] }}" style="width:50px"> ~ <input type="number" name="hd_max" value="{{ (reply.human_delay or [2,5])[1] }}" style="width:50px"> 秒</label>
     <label>发送上限：<input type="number" name="max_replies" value="{{ reply.max_replies or 0 }}" style="width:65px"> 条</label>
@@ -623,6 +623,38 @@ details summary:hover{color:var(--primary)}
       </tr>
       {% endfor %}
       {% if not pending and not pending_issues %}<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无待沉淀问题与未解诉求</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 群定时任务 -->
+<a name="tasks"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">群定时任务</div>
+    <span class="card-subtitle">群主/管理员 @机器人 说一句即可固化，如「@机器人 每天晚上9点总结一下群里的消息」；也可说「看看定时任务」「取消第一个任务」</span>
+  </div>
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th style="width:60px">#</th><th style="width:18%">来源群</th><th style="width:14%">执行时间</th><th>任务内容</th><th style="width:12%">创建人</th><th style="width:70px">操作</th></tr></thead>
+      <tbody>
+      {% for t in tasks %}
+      <tr>
+        <td class="muted">{{ t.id }}</td>
+        <td><b>{{ t.grp_name or t.grp }}</b></td>
+        <td style="font-family:Consolas,monospace">每天 {{ '%02d' % t.hour }}:{{ '%02d' % t.minute }}</td>
+        <td>{{ t.instruction }}</td>
+        <td class="muted">{{ t.created_by_name or '-' }}</td>
+        <td>
+          <form method="post" action="/tasks/delete" onsubmit="return confirm('删除该定时任务？')">
+            <input type="hidden" name="id" value="{{ t.id }}">
+            <button class="btn btn-sm btn-danger">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not tasks %}<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无定时任务，去群里 @机器人 说一句试试</td></tr>{% endif %}
       </tbody>
     </table>
   </div>
@@ -949,6 +981,7 @@ def start_web(bot):
                              for w in bot.store.warn_counts()[:8]) or "无",
             logs=logs, pending=bot.store.qa_pending(20),
             pending_issues=bot.store.pending_issues(limit=20),
+            tasks=bot.store.list_tasks(),
             bootstrap_status=bootstrap.status(),
             mine_status=mining.status(), mined=mined, mined_count=bot.store.mined_count(),
             m_group_links=_group_links(m_grp, "m"), m_page_no=m_page, m_pages_n=m_pages,
@@ -970,6 +1003,14 @@ def start_web(bot):
                        m_page=request.args.get("m_page", 1))
         _flash["msg"] = ""
         return page
+
+    @app.post("/tasks/delete")
+    def tasks_delete():
+        tid = request.form.get("id", type=int) or 0
+        if tid:
+            bot.store.remove_task(tid)
+            _flash["msg"] = f"已删除定时任务 #{tid}"
+        return redirect("/")
 
     @app.post("/pause")
     def pause():

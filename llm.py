@@ -48,7 +48,9 @@ class LLM:
                 json={
                     "model": self.model,
                     "temperature": temperature,
-                    "max_tokens": max_tokens,
+                    # 重试时预算翻倍：小预算被 reasoning 吃空后，同预算重试大概率还空，
+                    # 白等一轮；直接加大预算一次到位
+                    "max_tokens": max_tokens * (attempt + 1),
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},

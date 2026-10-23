@@ -2190,6 +2190,7 @@ class WeChatDB:
             "sender_username": sender_username,
             "create_time": r["create_time"],
             "content": content,
+            "source": _row_get(r, "source", ""),
             "sort_seq": r["sort_seq"],
             "shard": _row_get(r, "shard", ""),
         }
@@ -2482,6 +2483,24 @@ class WeChatDB:
         if not r:
             return None
         return r["nick_name"] or r["username"]
+
+    def get_room_owner(self, chatroom_wxid: str) -> str:
+        """查群主 wxid（chat_room.owner）；查不到返回空串。
+
+        供「群主才能给机器人下定时任务」之类的身份判断，比全量
+        get_group_members 轻得多。
+        """
+        conn = self._contact_conn()
+        if not conn:
+            return ""
+        try:
+            row = conn.execute(
+                "SELECT owner FROM chat_room WHERE username=? LIMIT 1",
+                (chatroom_wxid,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return (row["owner"] or "") if row else ""
 
     def get_group_members(self, chatroom_wxid: str) -> List[dict]:
         """枚举指定群聊的成员列表（静态读库，可轮询）。
