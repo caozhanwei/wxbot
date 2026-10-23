@@ -223,3 +223,17 @@ def test_check_latest_mirror_bad_manifest_falls_back(monkeypatch):
     monkeypatch.setattr(updater.requests, "get", fake_get)
     res = updater.check_latest(mirror="http://m")
     assert res["ok"] and res["latest"] == "v9.9.9"
+
+
+def test_check_latest_defaults_to_builtin_mirror(monkeypatch):
+    seen = {}
+
+    def fake_get(url, timeout=10, headers=None, stream=False):
+        seen["url"] = url
+        return _ManifestResp({"version": "v9.9.9", "msi": "wxbot-v9.9.9.msi"})
+
+    monkeypatch.setattr(updater.requests, "get", fake_get)
+    res = updater.check_latest()          # 不传 mirror：走内置默认镜像
+    assert seen["url"].startswith(updater.DEFAULT_MIRROR)
+    assert seen["url"].endswith("/manifest.json")
+    assert res["ok"] and res["latest"] == "v9.9.9"

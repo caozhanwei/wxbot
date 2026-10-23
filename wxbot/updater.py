@@ -12,6 +12,8 @@ from .version import VERSION
 
 REPO = "caozhanwei/wxbot"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
+# 内置国内镜像（GitHub 直连不稳的环境开箱即用）；app.update_mirror 可覆盖，镜像挂了自动回落 GitHub
+DEFAULT_MIRROR = "http://118.196.92.227:21120/wxbot-update"
 _UA = {"User-Agent": f"wxbot-updater/{VERSION}"}
 
 _STATUS = {"state": "idle", "progress": 0, "total": 0, "msi": "", "latest": "", "error": ""}
@@ -54,12 +56,13 @@ def _check_mirror(base, timeout) -> dict:
 def check_latest(timeout=10, mirror="") -> dict:
     """查最新版 → {ok, latest, newer, msi_url, notes, message}。
 
-    配了镜像源（app.update_mirror）先走镜像（国内直连 GitHub 常超时），失败回落 GitHub。
+    镜像源默认内置（DEFAULT_MIRROR，app.update_mirror 可覆盖）；
+    镜像失败自动回落 GitHub Releases。
     """
-    if mirror:
-        res = _check_mirror(mirror.rstrip("/"), timeout)
-        if res["ok"]:
-            return res
+    base = (mirror or "").strip() or DEFAULT_MIRROR
+    res = _check_mirror(base.rstrip("/"), timeout)
+    if res["ok"]:
+        return res
     try:
         r = requests.get(API_LATEST, timeout=timeout, headers=_UA)
         r.raise_for_status()

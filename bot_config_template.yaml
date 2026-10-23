@@ -8,8 +8,8 @@ app:
   web_port: 8778
   db_file: wxbot.db
   auto_profile_hours: 0          # 定时增量画像：>0 时每 N 小时自动刷新启用群的活跃成员画像（0=关）
-  update_mirror: ""              # 升级检查国内镜像源（如 http://your-server:21120/wxbot-update）；留空走 GitHub，
-                                 # 配了则优先镜像、失败自动回落 GitHub（本机访问 github 不稳时用）
+  update_mirror: ""              # 升级镜像源覆盖项：留空=用程序内置国内镜像（推荐，GitHub 不稳环境开箱即用）；
+                                 # 也可填自己的镜像 URL；镜像不可用自动回落 GitHub
 llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
   base_url: https://your-llm-gateway.example/v1

@@ -189,3 +189,22 @@ def test_update_check_passes_mirror_to_updater(client):
     assert seen["mirror"] == "http://m.example/wxbot-update"
     body = c.get("/").data.decode("utf-8")
     assert "已配置国内镜像加速" in body
+
+
+def test_update_check_defaults_to_builtin_mirror(client):
+    c, bot = client                      # 配置里不写 update_mirror
+    seen = {}
+
+    def fake_check(timeout=10, mirror=""):
+        seen["mirror"] = mirror
+        return {"ok": True, "latest": "v9.9.9", "newer": True, "msi_url": "http://m/x.msi",
+                "notes": "", "message": ""}
+
+    orig = webui.updater.check_latest
+    webui.updater.check_latest = fake_check
+    try:
+        c.post("/update/check")
+    finally:
+        webui.updater.check_latest = orig
+    import wxbot.updater as _u
+    assert seen["mirror"] == _u.DEFAULT_MIRROR

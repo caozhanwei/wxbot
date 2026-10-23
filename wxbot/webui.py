@@ -1093,7 +1093,8 @@ def start_web(bot):
             p_prev=(_href(p_page=p_page - 1) if p_page > 1 else ""),
             p_next=(_href(p_page=p_page + 1) if p_page < p_pages else ""),
             app_version=updater.current_version(),
-            update_mirror=str((snap.get("app") or {}).get("update_mirror") or "").strip(),
+            update_mirror=(str((snap.get("app") or {}).get("update_mirror") or "").strip()
+                           or updater.DEFAULT_MIRROR),
             update_check=_UPDATE_CHECK.get("res"),
             update_status=updater.status(),
             cfg_text=yaml.safe_dump(snap, allow_unicode=True, sort_keys=False))
@@ -1118,7 +1119,9 @@ def start_web(bot):
     # ---------- 在线更新 ----------
     @app.post("/update/check")
     def update_check():
-        mirror = str((bot.cfg.data.get("app") or {}).get("update_mirror") or "").strip()
+        # 固化默认镜像：未配置时用内置 DEFAULT_MIRROR，配置了按配置覆盖
+        mirror = str((bot.cfg.data.get("app") or {}).get("update_mirror") or "").strip() \
+            or updater.DEFAULT_MIRROR
         _UPDATE_CHECK["res"] = updater.check_latest(mirror=mirror)
         return redirect("/#about")
 
