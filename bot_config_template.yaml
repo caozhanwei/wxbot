@@ -24,6 +24,12 @@ app:
                                  # 急停用管理员命令：#急停主动 / #恢复主动
   console:                       # 主人对话台：在"文件传输助手"里发消息=直接问助手（跨群/私聊记录检索问答）
     enabled: true                # 设 false 关闭；# 开头仍走管理员命令；对话台回复不受闸门/暂停限制
+  care:                          # 主动关怀：好久没聊的好友按记忆点生成问候（新装默认演练，只记日志不真发）
+    enabled: false               # 总开关；dry_run: true 时只在日志里演练话术，确认靠谱再改 false
+    dry_run: true
+    hour: 10                     # 每天几点挑人发（配合闸门 8~22 点时段窗）
+    days_min: 7                  # 超过 N 天没聊过才算"好久没聊"
+    max_per_day: 3               # 每天最多关怀几人；每人每周最多 1 次（内置）
 llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
   base_url: https://your-llm-gateway.example/v1

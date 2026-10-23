@@ -424,3 +424,14 @@ def test_group_save_empty_g_admins_clears(client):
         "qa_enabled": "on", "g_admins": "",
     }, follow_redirects=True)
     assert _load(path)["groups"][0]["admins"] == []
+
+
+def test_reminders_card_and_done(client):
+    c, bot, path = client
+    import time as _t
+    bot.store.add_reminder("张三", "张三", "把材料发我", _t.time() + 86400)
+    body = c.get("/").data.decode("utf-8")
+    assert "约定提醒" in body and "把材料发我" in body
+    rid = bot.store.list_reminders()[0]["id"]
+    c.post("/reminders/done", data={"id": str(rid)}, follow_redirects=True)
+    assert bot.store.list_reminders(status="pending") == []

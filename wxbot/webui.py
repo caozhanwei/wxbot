@@ -21,7 +21,8 @@ _PAGE_SIZE = 20   # 画像/问答库浏览页大小
 
 _NAV = [("仪表盘", "#top"), ("最近会话", "#recent"), ("私聊联系人", "#contacts"),
         ("人设库", "#personas"), ("群管理与答疑", "#groups"), ("模型与节奏", "#llm"), ("知识库", "#kb"),
-        ("运行日志", "#logs"), ("待沉淀问题", "#pending"), ("群历史挖掘", "#mine"),
+        ("运行日志", "#logs"), ("待沉淀问题", "#pending"), ("约定提醒", "#reminders"),
+        ("群历史挖掘", "#mine"),
         ("群友画像", "#profiles"), ("高级 YAML", "#yaml"), ("关于", "#about")]
 
 _PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -674,6 +675,35 @@ details summary:hover{color:var(--primary)}
   </div>
 </div>
 
+<!-- 约定提醒 -->
+<a name="reminders"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">约定提醒</div>
+    <span class="card-subtitle">私聊里抽到的双方约定，到期自动推送提醒（群里@相关人 / 私事推文件传输助手）；完成即销项</span>
+  </div>
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th style="width:60px">#</th><th style="width:14%">谁</th><th>约定事项</th><th style="width:110px">到期</th><th style="width:80px">操作</th></tr></thead>
+      <tbody>
+      {% for r in reminders %}
+      <tr>
+        <td class="muted">{{ r.id }}</td>
+        <td><b>{{ r.who_name }}</b></td>
+        <td>{{ r.what }}{% if r.grp_name %} <span class="muted" style="font-size:12px">（记自群 {{ r.grp_name }}）</span>{% elif r.src %} <span class="muted" style="font-size:12px">（记自与「{{ r.src }}」的私聊）</span>{% endif %}</td>
+        <td class="muted">{{ r.due_str }}</td>
+        <td><form method="post" action="/reminders/done" style="margin:0">
+          <input type="hidden" name="id" value="{{ r.id }}">
+          <button class="btn btn-sm" type="submit">销项</button>
+        </form></td>
+      </tr>
+      {% endfor %}
+      {% if not reminders %}<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无待办约定；微信里发 #提醒 也能看</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <!-- 群定时任务 -->
 <a name="tasks"></a>
 <div class="card">
@@ -1162,6 +1192,9 @@ def start_web(bot):
             warns=" / ".join(f'{w["chat"]}·{w["member"]}×{w["n"]}'
                              for w in bot.store.warn_counts()[:8]) or "无",
             logs=logs, pending=bot.store.qa_pending(20),
+            reminders=[dict(r, due_str=time.strftime(
+                "%m-%d %H:%M", time.localtime(r["due"] or 0)))
+                for r in bot.store.list_reminders(status="pending")],
             group_owners=_group_owners(driver, snap.get("groups") or []),
             gadmin_lines=[f"{g.get('display') or g.get('id')}：{'、'.join(g.get('admins') or [])}"
                           for g in (snap.get("groups") or []) if g.get("admins")],
@@ -1606,6 +1639,16 @@ def start_web(bot):
                     break
         _flash["msg"] = (f"主题整理完成：新归簇 {total} 条" if total
                          else "没有需要归簇的问答（或 LLM 暂不可用）")
+        return redirect("/")
+
+    @app.post("/reminders/done")
+    def reminders_done():
+        from . import reminders as reminders_mod
+        try:
+            rid = int(request.form.get("id"))
+        except (TypeError, ValueError):
+            return _render(form_error="参数错误")
+        _flash["msg"] = reminders_mod.cmd_done(bot, [str(rid)])
         return redirect("/")
 
     @app.post("/profiles/refresh")

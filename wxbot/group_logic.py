@@ -80,6 +80,15 @@ def join_name(content):
     return None
 
 
+_LEAVE_PATTERN = re.compile(r"\"(.+?)\"(?:退出了群聊|被\".+?\"移出了群聊)")
+
+
+def leave_name(content):
+    """系统消息中退群/被移出者的昵称，非退群类消息返回 None。"""
+    m = _LEAVE_PATTERN.search(content or "")
+    return m.group(1) if m else None
+
+
 def forbidden_hit(content, words):
     """返回命中的第一个违禁词，未命中返回 None。"""
     for w in words or []:

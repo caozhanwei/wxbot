@@ -5,6 +5,7 @@ import queue
 import random
 import threading
 import time
+from collections import deque
 
 from answer import McpKBClient, KBError
 
@@ -222,11 +223,15 @@ class Bot:
         max_replies = int(rc.get("max_replies", 0) or 0)
         max_runtime = int(rc.get("max_runtime_min", 0) or 0) * 60
         log.info("启动完成 dry_run=%s", self.cfg.dry_run)
+        from . import care as _care
         from . import digest as _digest
+        from . import reminders as _reminders
         from .scheduler import DailyJob, Scheduler
         dd = self.cfg.app.get("daily_digest") or {}
+        cc = self.cfg.app.get("care") or {}
         self._scheduler = Scheduler(self, [
-            DailyJob("digest", int(dd.get("hour") or 21), fn=_digest.run_digest)])
+            DailyJob("digest", int(dd.get("hour") or 21), fn=_digest.run_digest),
+            DailyJob("care", int(cc.get("hour") or 10), fn=_care.run_care)])
         self._scheduler.start()
         while True:
             if self.cfg.maybe_reload():
@@ -261,6 +266,8 @@ class Bot:
                     self._on_group_msgs(w, msgs)
             self._maybe_auto_mine()
             self._maybe_run_tasks()
+            _reminders.maybe_extract(self)
+            _reminders.maybe_fire(self)
             time.sleep(float(rc.get("poll_sec", POLL_SEC_DEFAULT)))
 
     def _maybe_auto_mine(self):
@@ -438,6 +445,8 @@ class Bot:
             if id(m) in handled:
                 continue
             if m["type"] == "系统消息":
+                if group_logic.leave_name(m["content"]):
+                    self.notify_admins(f"[群秩序] {w['display']}：{(m['content'] or '')[:60]}")
                 if mg.get("welcome"):
                     name = group_logic.join_name(m["content"])
                     if name:
@@ -454,6 +463,7 @@ class Bot:
                     from . import digest
                     digest.record_at_missed(self, w, m)
                 continue
+            self._track_flood(w, m)
             word = None
             if mg.get("forbidden_words"):
                 word = group_logic.forbidden_hit(m["content"], mg["forbidden_words"])
@@ -466,10 +476,38 @@ class Bot:
                 except Exception as e:
                     log.exception("免@回复异常(%s): %s", w["display"], e)
 
+    def _track_flood(self, w, m):
+        """发言频次追踪：60 秒内连发超限 → 告警管理员（每成员每小时最多一次）。"""
+        mx = int(_num(((w["cfg"].get("manage") or {}).get("order") or {}).get("flood_max"), 10))
+        if mx <= 0:
+            return
+        key = (w["user"], m["sender"])
+        dq = self.state.setdefault("flood", {}).setdefault(key, deque())
+        now = time.time()
+        dq.append(now)
+        while dq and now - dq[0] > 60:
+            dq.popleft()
+        if len(dq) < mx:
+            return
+        if now - self.state.setdefault("flood_alert", {}).get(key, 0) < 3600:
+            return
+        self.state["flood_alert"][key] = now
+        who = m.get("sender_display") or m["sender"]
+        self.notify_admins(f"[群秩序] {w['display']} 的 {who} 1 分钟内连发 "
+                           f"{len(dq)} 条消息，疑似刷屏，请关注")
+
     def _welcome(self, w, name):
         text = ((w["cfg"].get("manage") or {}).get("welcome_text")
                 or "欢迎 {name} 入群！有问题可以直接 @我 提问～")
-        self.send(w["display"], text.format(name=name), "welcome")
+        text = text.format(name=name)
+        try:
+            top = self.store.themes_list(w["user"])[:3]
+        except Exception:
+            top = []
+        if top:
+            text += "\n群里有沉淀的常见话题：" + \
+                "、".join(t["theme"] for t in top) + "，@我问就行"
+        self.send(w["display"], text, "welcome")
 
     def _group_qa(self, w, m):
         g = w["cfg"]
@@ -913,7 +951,7 @@ class Bot:
     def _do_admin(self, name, args):
         if name in ("帮助", "help", ""):
             return ("命令：#状态 #暂停 #恢复 #补报 #急停主动 #恢复主动 "
-                    "#开 <名> #关 <名> #重载 #待审\n"
+                    "#开 <名> #关 <名> #重载 #待审 #提醒 #销项 #催办 #已解\n"
                     "（联系人/群名单与开关在 bot_config.yaml 或网页配置）")
         if name == "状态":
             ups = int(time.time() - self.state["start"])
@@ -964,4 +1002,16 @@ class Bot:
                 return "暂无待沉淀问题"
             return "\n".join(f'#{r["id"]} [{r["grp"]}] {r["questioner"]}: {r["question"][:40]}'
                              for r in rows)
+        if name == "提醒":
+            from . import reminders
+            return reminders.cmd_list(self)
+        if name == "销项":
+            from . import reminders
+            return reminders.cmd_done(self, args)
+        if name == "催办":
+            from . import followup
+            return followup.cmd_urge(self, args)
+        if name == "已解":
+            from . import followup
+            return followup.cmd_resolve(self, args)
         return f"未知命令 #{name}，#帮助 查看"

@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS daily_stats(
     PRIMARY KEY(day, grp));
 CREATE TABLE IF NOT EXISTS mined_themes(
     qa_id INTEGER PRIMARY KEY, theme TEXT, updated REAL);
+CREATE TABLE IF NOT EXISTS reminders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, src TEXT,
+    grp TEXT, grp_name TEXT, who_name TEXT, what TEXT,
+    due REAL, status TEXT DEFAULT 'pending', fired REAL,
+    remind_count INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS remind_seq(
+    chat TEXT PRIMARY KEY, seq INTEGER, ts REAL);
+CREATE TABLE IF NOT EXISTS care_log(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, wxid TEXT,
+    name TEXT, text TEXT);
 """
 
 
@@ -112,6 +122,16 @@ class Store:
                 "SELECT * FROM qa_pending WHERE status='pending' ORDER BY id DESC LIMIT ?",
                 (limit,)).fetchall()
             return [dict(r) for r in rows]
+
+    def get_qa_pending(self, rid):
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM qa_pending WHERE id=?",
+                            (int(rid),)).fetchone()
+            return dict(row) if row else None
+
+    def mark_qa_done(self, rid):
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE qa_pending SET status='done' WHERE id=?", (int(rid),))
 
     # ---------- 挖掘 ----------
     def add_mined(self, grp, pairs):
@@ -182,6 +202,62 @@ class Store:
              " WHERE t.qa_id IS NULL AND m.grp=? ORDER BY m.id LIMIT ?")
         with self._conn() as c:
             return [dict(r) for r in c.execute(q, (grp, limit)).fetchall()]
+
+    # ---------- 约定提醒 ----------
+    def add_reminder(self, src, who_name, what, due, grp=None, grp_name=""):
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO reminders(ts,src,grp,grp_name,who_name,what,due)"
+                      " VALUES(?,?,?,?,?,?,?)",
+                      (time.time(), src, grp or "", grp_name or "",
+                       str(who_name)[:60], str(what)[:200], float(due)))
+
+    def due_reminders(self, now=None, limit=10):
+        now = time.time() if now is None else now
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM reminders WHERE status='pending' AND due<=?"
+                " AND fired IS NULL ORDER BY due LIMIT ?", (now, limit)).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_reminders(self, status="pending", limit=30):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM reminders WHERE status=? ORDER BY due LIMIT ?",
+                (status, limit)).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_reminder(self, rid, status, fired=None):
+        with self._lock, self._conn() as c:
+            if fired is None:
+                c.execute("UPDATE reminders SET status=? WHERE id=?",
+                          (status, int(rid)))
+            else:
+                c.execute("UPDATE reminders SET status=?, fired=? WHERE id=?",
+                          (status, float(fired), int(rid)))
+
+    def get_remind_seq(self, chat):
+        with self._conn() as c:
+            row = c.execute("SELECT seq FROM remind_seq WHERE chat=?",
+                            (chat,)).fetchone()
+            return row["seq"] if row else 0
+
+    def set_remind_seq(self, chat, seq):
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO remind_seq(chat,seq,ts) VALUES(?,?,?) "
+                      "ON CONFLICT(chat) DO UPDATE SET seq=excluded.seq, "
+                      "ts=excluded.ts", (chat, int(seq), time.time()))
+
+    # ---------- 主动关怀 ----------
+    def log_care(self, wxid, name, text=""):
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO care_log(ts,wxid,name,text) VALUES(?,?,?,?)",
+                      (time.time(), wxid, str(name)[:60], str(text)[:200]))
+
+    def care_count_since(self, wxid, days=7):
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) n FROM care_log WHERE wxid=? AND ts>=?",
+                            (wxid, time.time() - days * 86400)).fetchone()
+            return row["n"]
 
     def get_mined_seq(self, chat):
         with self._conn() as c:

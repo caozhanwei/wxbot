@@ -419,6 +419,36 @@ class PersonaEngine:
         user = "待归类的问题：\n" + "\n".join(f"{i}: {q}" for i, q in pairs)
         return self.llm.chat_json(system, user, temperature=0.1)
 
+    def extract_reminders(self, dialog_lines, base_date):
+        """从私聊对话抽取双方约定 → {"items":[{"who","what","date","time"}]}。"""
+        system = (
+            "你是微信私人助手的约定抽取器。从私聊对话里找出双方明确的约定/承诺/待办："
+            "谁要做什么、什么时候做（限 60 天内）。"
+            "只抽有明确时间的约定（今天稍后/明天/后天/大后天/具体日期/周几），"
+            "闲聊、寒暄、没有时间点的都不要；把相对时间换算成绝对日期。"
+            f"今天的日期是 {base_date}。"
+            '只输出 JSON：{"items": [{"who": "承诺人（对方昵称或\\"我\\"）", '
+            '"what": "约定内容(30字内)", "date": "YYYY-MM-DD", '
+            '"time": "HH:MM（没说就 09:00）"}]}，最多 3 条，没有输出空数组。'
+        )
+        user = "私聊对话：\n" + "\n".join(dialog_lines)
+        return self.llm.chat_json(system, user, temperature=0.0)
+
+    def care_greeting(self, who, memory, days):
+        """好久没聊的好友主动问候：带具体记忆点，别空洞开场。"""
+        p = self.cfg.persona("通用朋友")
+        system = (
+            f"你在替号主主动问候一位 {days} 天没聊过天的好友。"
+            f"说话风格：{p.get('style') or '自然随和'}。"
+            "带一个具体的记忆点自然开启话题（结合下面关于这位好友的记忆），"
+            "别用\"好久不见\"这种空洞开场，别提自己是AI/助手，"
+            "像老朋友顺嘴想起对方似的，20~60 字，"
+            "只输出一条可直接发送的微信文本，不要解释不要引号。"
+        )
+        user = f"好友：{who}\n关于这位好友的记忆：{memory or '（暂无，泛泛问候但别太空洞）'}"
+        raw = self.llm.chat(system, user, temperature=0.8)
+        return _sanitize(raw)
+
     def warn_message(self, persona_name, member, word, nth, threshold):
         """违禁词劝告话术。"""
         p = self.cfg.persona(persona_name)
