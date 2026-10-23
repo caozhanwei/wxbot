@@ -96,6 +96,35 @@ def test_welcome_without_themes_plain(tmp_path):
     assert "常见话题" not in logs[0]["detail"]           # 没主题库不加尾巴
 
 
+def test_render_welcome_placeholder_spellings():
+    """占位符容错：真事——用户配置写 $names$ 原样发了出去。"""
+    from wxbot import group_logic as gl
+    assert gl.render_welcome("欢迎 {name} 入群", "小王") == "欢迎 小王 入群"
+    assert gl.render_welcome("欢迎 $names$ 入群", "小王") == "欢迎 小王 入群"
+    assert gl.render_welcome("欢迎 $name$ 入群", "小王") == "欢迎 小王 入群"
+    assert gl.render_welcome("欢迎 %name% 入群", "小王") == "欢迎 小王 入群"
+    assert gl.render_welcome("欢迎 {昵称} 入群", "小王") == "欢迎 小王 入群"
+
+
+def test_render_welcome_other_braces_survive():
+    """用户文本里别的花括号不炸也原样保留（旧 .format 会 KeyError 欢迎全没）。"""
+    from wxbot import group_logic as gl
+    out = gl.render_welcome("欢迎 {name}！{@我} 提问～", "小王")
+    assert out == "欢迎 小王！{@我} 提问～"
+    assert gl.render_welcome("没占位符", "小王") == "没占位符"
+
+
+def test_welcome_dollar_placeholder_end_to_end(tmp_path):
+    b = _mk_bot(tmp_path)
+    b.build_watch()
+    w = _group_w(b)
+    w["cfg"].setdefault("manage", {})["welcome_text"] = "欢迎 $names$ 入群！我是业主助手"
+    b._welcome(w, "张三")
+    logs = [r for r in b.store.recent_logs(20) if r["kind"] == "welcome"]
+    assert logs and "欢迎 张三 入群" in logs[0]["detail"]
+    assert "$names$" not in logs[0]["detail"]
+
+
 # ---------- 广告号识别（只告警，踢人走 #踢 人工确认） ----------
 
 def test_ads_markers_basics():

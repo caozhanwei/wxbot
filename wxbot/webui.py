@@ -50,14 +50,14 @@ body{
   line-height:1.5;padding-bottom:60px;-webkit-font-smoothing:antialiased;
 }
 
-/* 顶部导航吸顶栏 */
+/* 顶部导航吸顶栏（标题行 + 快捷导航药丸整体吸顶，下滑不消失） */
 .top-header{
   position:sticky;top:0;z-index:100;
   background:rgba(255,255,255,0.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
   border-bottom:1px solid var(--border);box-shadow:var(--shadow-sm);
-  padding:10px 24px;
+  padding:10px 0;
 }
-.header-inner{max-width:1380px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.header-inner{max-width:1380px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:0 24px}
 .brand{display:flex;align-items:center;gap:10px}
 .brand-icon{
   width:32px;height:32px;background:var(--primary);color:#fff;
@@ -202,7 +202,7 @@ details summary:hover{color:var(--primary)}
 </head>
 <body id="top">
 
-<!-- 顶部吸顶条 -->
+<!-- 顶部吸顶条（标题行 + 快捷导航药丸一起吸顶） -->
 <header class="top-header">
   <div class="header-inner">
     <div class="brand">
@@ -220,12 +220,10 @@ details summary:hover{color:var(--primary)}
       </form>
     </div>
   </div>
+  <nav class="nav-tabs">
+    {% for n, h in nav %}<a href="{{ h }}">{{ n }}</a>{% endfor %}
+  </nav>
 </header>
-
-<!-- 快捷导航 -->
-<nav class="nav-tabs">
-  {% for n, h in nav %}<a href="{{ h }}">{{ n }}</a>{% endfor %}
-</nav>
 
 <div class="container">
 
@@ -498,7 +496,7 @@ details summary:hover{color:var(--primary)}
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
       <label><input type="checkbox" name="welcome" {{ 'checked' if (g.manage or {}).get('welcome') }}> 进群欢迎语</label>
-      <input type="text" name="welcome_text" value="{{ (g.manage or {}).get('welcome_text') or '' }}" style="flex:1;min-width:260px" placeholder="欢迎 {name} 入群！…（{name} 为新人昵称）">
+      <input type="text" name="welcome_text" value="{{ (g.manage or {}).get('welcome_text') or '' }}" style="flex:1;min-width:260px" placeholder="欢迎 {name} 入群！…（{name} 为新人昵称，$name$ 也认）">
     </div>
     <div class="row" style="padding:6px 0;border-top:1px dashed var(--border)">
       <label>违禁词拦截：</label>

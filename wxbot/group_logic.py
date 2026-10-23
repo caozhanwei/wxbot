@@ -89,6 +89,22 @@ def leave_name(content):
     return m.group(1) if m else None
 
 
+# 欢迎语占位符的各种民间写法都认（真出过事：配置里写 $names$ 原样发了出去）
+_WELCOME_PLACEHOLDERS = ("{name}", "{昵称}", "{nickname}", "{新人}",
+                         "$name$", "$names$", "$昵称$", "%name%")
+
+
+def render_welcome(text, name):
+    """欢迎语占位符容错替换：{name}/$name$/$names$/%name%/{昵称} 等一律替换。
+
+    刻意不用 str.format——用户文本里再有别的花括号（如 {@我}）不会炸，
+    不认识的占位符原样保留。"""
+    for ph in _WELCOME_PLACEHOLDERS:
+        if ph in text:
+            text = text.replace(ph, name)
+    return text
+
+
 # 广告号常见话术特征：新成员进群即发这些，基本可断定营销号
 ADS_DEFAULT_KEYWORDS = (
     "加微信", "加我vx", "加V信", "薇信", "兼职", "刷单", "返利", "优惠券",

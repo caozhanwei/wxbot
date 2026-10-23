@@ -134,6 +134,17 @@ def test_index_renders(client):
         assert s in body, f"页面缺少 {s}"
 
 
+def test_nav_tabs_inside_sticky_header(client):
+    """快捷导航药丸必须吸顶：嵌在 sticky 的 top-header 里，下滑不消失。"""
+    c, bot, path = client
+    body = c.get("/").data.decode("utf-8")
+    h_open = body.index('<header class="top-header">')
+    nav = body.index('class="nav-tabs"')
+    h_close = body.index("</header>")
+    assert h_open < nav < h_close
+    assert "position:sticky;top:0" in body
+
+
 def test_tasks_card_and_delete(client):
     c, bot, path = client
     bot.store.add_task("111@chatroom", "测试群", 21, 0, "总结今天群里的消息",

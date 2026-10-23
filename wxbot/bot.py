@@ -549,7 +549,7 @@ class Bot:
     def _welcome(self, w, name):
         text = ((w["cfg"].get("manage") or {}).get("welcome_text")
                 or "欢迎 {name} 入群！有问题可以直接 @我 提问～")
-        text = text.format(name=name)
+        text = group_logic.render_welcome(text, name)
         try:
             top = self.store.themes_list(w["user"])[:3]
         except Exception:
