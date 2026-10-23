@@ -636,6 +636,12 @@ details summary:hover{color:var(--primary)}
     <div class="card-title">群定时任务</div>
     <span class="card-subtitle">群主/管理员 @机器人 说一句即可固化，如「@机器人 每天晚上9点总结一下群里的消息」；也可说「看看定时任务」「取消第一个任务」</span>
   </div>
+  <div class="row" style="font-size:13px;background:var(--surface-sub);border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+    <b>谁有权限下任务指令：</b>
+    <span>配置的管理员：{{ admins | join('、') if admins else '（未配置）' }}</span>
+    {% for go in group_owners %}<span class="muted">｜{{ go.gname }} 群主：{{ go.owner }}</span>{% endfor %}
+    {% if not driver_up %}<span class="muted">（微信未连接，群主名单暂不可见）</span>{% endif %}
+  </div>
   <div class="table-responsive">
     <table>
       <thead><tr><th style="width:60px">#</th><th style="width:18%">来源群</th><th style="width:14%">执行时间</th><th>任务内容</th><th style="width:12%">创建人</th><th style="width:70px">操作</th></tr></thead>
@@ -976,6 +982,32 @@ def start_web(bot):
         grp_names = {g.get("id"): (g.get("display") or g.get("id") or "")
                      for g in snap.get("groups") or []}
 
+        def _group_owners(drv, groups):
+            """群主名单（chat_room.owner 自动读取，微信离线时为空）。"""
+            owners = []
+            chat_owner = getattr(drv, "chat_owner", None)
+            if not drv or not callable(chat_owner):
+                return owners
+            for g in groups or []:
+                gid = g.get("id") or ""
+                if not gid:
+                    continue
+                try:
+                    owid = chat_owner(gid)
+                except Exception:
+                    owid = ""
+                if not owid:
+                    continue
+                oname = owid
+                disp = getattr(drv, "display_of", None)
+                if callable(disp):
+                    try:
+                        oname = disp(owid) or owid
+                    except Exception:
+                        pass
+                owners.append({"gname": g.get("display") or gid, "owner": oname})
+            return owners
+
         def _int(v, default=1):
             try:
                 return int(v)
@@ -1037,6 +1069,7 @@ def start_web(bot):
             warns=" / ".join(f'{w["chat"]}·{w["member"]}×{w["n"]}'
                              for w in bot.store.warn_counts()[:8]) or "无",
             logs=logs, pending=bot.store.qa_pending(20),
+            group_owners=_group_owners(driver, snap.get("groups") or []),
             pending_issues=bot.store.pending_issues(limit=20),
             tasks=bot.store.list_tasks(),
             bootstrap_status=bootstrap.status(),

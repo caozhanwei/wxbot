@@ -71,6 +71,12 @@ class FakeDriver:
         return [r for r in self.chats
                 if q in (r["display"] + r["id"]).replace(" ", "").lower()][:limit]
 
+    def chat_owner(self, gid):
+        return "wxid_owner1" if gid == "111@chatroom" else ""
+
+    def display_of(self, wxid):
+        return "老王" if wxid == "wxid_owner1" else wxid
+
 
 class StubBot:
     """模拟 Bot/BotShell 的最小外观（build_watch 可计数）。"""
@@ -137,6 +143,15 @@ def test_tasks_card_and_delete(client):
     tid = bot.store.list_tasks()[0]["id"]
     c.post("/tasks/delete", data={"id": str(tid)}, follow_redirects=True)
     assert bot.store.list_tasks() == []
+
+
+def test_tasks_permission_visible(client):
+    """任务指令权限显性化：配置管理员 + 各群群主（chat_room.owner）直接显示在页面。"""
+    c, bot, path = client
+    body = c.get("/").data.decode("utf-8")
+    assert "谁有权限下任务指令" in body
+    assert "wxid_admin" in body
+    assert "测试群 群主：老王" in body
 
 
 def test_contact_new_save_del(client):
