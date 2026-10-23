@@ -69,10 +69,11 @@ class McpKBClient:
         self._ensure_init()
         d = self._rpc("tools/call", {"name": name, "arguments": arguments})
         result = d.get("result", {})
-        if result.get("isError"):
-            raise KBError(f"工具 {name} 返回错误")
         parts = result.get("content") or []
-        return "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        text = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        if result.get("isError"):
+            raise KBError(f"工具 {name} 返回错误: {text[:200]}")
+        return text
 
     def ask(self, question: str, room: str = ""):
         """RAG 问答。返回 (answer, hit, grounded)：
