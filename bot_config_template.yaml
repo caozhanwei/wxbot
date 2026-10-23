@@ -10,6 +10,18 @@ app:
   auto_profile_hours: 0          # 定时增量画像：>0 时每 N 小时自动刷新启用群的活跃成员画像（0=关）
   update_mirror: ""              # 升级镜像源覆盖项：留空=用程序内置国内镜像（推荐，GitHub 不稳环境开箱即用）；
                                  # 也可填自己的镜像 URL；镜像不可用自动回落 GitHub
+  missed_private:                # 非白名单私聊被动监控：只记入"补报缓存"绝不回复；急件（含 急/紧急/尽快 等词）即时推送
+    enabled: true                # 设 false 关闭；文件传输助手/公众号/自己永不监控
+  daily_digest:                  # 每晚群精华日报：AI 热点摘要 + 未解问题 + 找你的事（@我未答/私聊找你）
+    enabled: false               # 总开关（默认关；群还要在群配置勾"进日报"才出小节）
+    hour: 21                     # 发送时刻（0~23）；错过开机当天会补发，跨天不补
+    push_to: 文件传输助手          # 日报/急件推给谁
+  gate:                          # 主动动作闸门：日报/急件等机器人主动发送统一过闸，防刷屏
+    enabled: true
+    hourly_max: 20               # 全局每小时最多主动发几条（0=不限）
+    per_chat_daily_max: 30       # 每个会话每天最多几条（0=不限）
+    window: [8, 22]              # 允许主动发送的时段（小时，含头不含尾）；急件豁免时段窗
+                                 # 急停用管理员命令：#急停主动 / #恢复主动
 llm:                             # 模型接口：任意 OpenAI 兼容网关（自建网关/智谱/百炼均可），私聊回复靠它生成
   provider: custom
   base_url: https://your-llm-gateway.example/v1
@@ -80,6 +92,8 @@ groups:
   persona: 老友幽默
   mention_names: []
   mine: false                  # 自动增量挖掘群历史 → 网页"挖掘"区查看/导出
+  digest:                      # 群精华日报（需 app.daily_digest.enabled 也开）
+    enabled: false             # 勾选后该群每晚出小节：AI 热点摘要 + 未解问题 + @我未答
   no_at_reply: false           # 免@接话：没人@机器人时也按最近聊天判断是否主动回复（默认关）
   active: false                # 活跃分子：免@不做“值不值得”智能判定，冷却一过就像群友一样自然接话（冷却仍节流）
   no_at_context: 20            # 免@判断参考的最近消息条数（含触发消息，默认 20）

@@ -42,6 +42,19 @@ CREATE TABLE IF NOT EXISTS group_tasks(
     instruction TEXT, enabled INTEGER DEFAULT 1,
     created_by TEXT, created_by_name TEXT, created_ts REAL,
     last_run REAL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS digest_log(
+    day TEXT, grp TEXT, last_seq INTEGER, created REAL,
+    PRIMARY KEY(day, grp));
+CREATE TABLE IF NOT EXISTS missed_cache(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, src TEXT,
+    chat TEXT, sender TEXT, sender_display TEXT, content TEXT,
+    urgency TEXT DEFAULT 'normal', digested INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS daily_runs(
+    job TEXT, day TEXT, ts REAL, PRIMARY KEY(job, day));
+CREATE TABLE IF NOT EXISTS daily_stats(
+    day TEXT, grp TEXT, msg_count INTEGER, active_members INTEGER,
+    top_words TEXT, pending_count INTEGER, updated REAL,
+    PRIMARY KEY(day, grp));
 """
 
 
@@ -229,6 +242,72 @@ class Store:
                 continue                     # 槽点后才创建的，明天首发
             out.append(t)
         return out
+
+    # ---------- 错过补报 / 日报 / 日任务 / 每日统计 ----------
+    def add_missed(self, src, chat, sender, sender_display, content, ts=None,
+                   urgency="normal"):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO missed_cache(ts,src,chat,sender,sender_display,"
+                "content,urgency,digested) VALUES(?,?,?,?,?,?,?,0)",
+                (time.time() if ts is None else ts, src, chat, sender,
+                 sender_display or "", str(content)[:500], urgency))
+
+    def missed_unconsumed(self, src=None, limit=200):
+        q = ("SELECT * FROM missed_cache WHERE digested=0"
+             + (" AND src=?" if src else "") + " ORDER BY id LIMIT ?")
+        with self._conn() as c:
+            rows = c.execute(q, ((src,) if src else ()) + (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_missed_consumed(self, ids):
+        ids = [int(i) for i in (ids or []) if int(i) > 0]
+        if not ids:
+            return
+        marks = ",".join("?" * len(ids))
+        with self._lock, self._conn() as c:
+            c.execute(f"UPDATE missed_cache SET digested=1 WHERE id IN ({marks})", ids)
+
+    def digest_done(self, grp, day, last_seq=0):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO digest_log(day,grp,last_seq,created) VALUES(?,?,?,?) "
+                "ON CONFLICT(day,grp) DO UPDATE SET last_seq=excluded.last_seq, "
+                "created=excluded.created",
+                (day, grp, int(last_seq), time.time()))
+
+    def digest_done_day(self, grp, day):
+        with self._conn() as c:
+            return c.execute("SELECT 1 FROM digest_log WHERE day=? AND grp=?",
+                             (day, grp)).fetchone() is not None
+
+    def mark_daily_run(self, job, day, ts=None):
+        with self._lock, self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO daily_runs(job,day,ts) VALUES(?,?,?)",
+                      (job, day, time.time() if ts is None else ts))
+
+    def daily_ran(self, job, day):
+        with self._conn() as c:
+            return c.execute("SELECT 1 FROM daily_runs WHERE job=? AND day=?",
+                             (job, day)).fetchone() is not None
+
+    def upsert_daily_stats(self, day, grp, msg_count=0, active_members=0,
+                           top_words="", pending_count=0):
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT INTO daily_stats(day,grp,msg_count,active_members,"
+                "top_words,pending_count,updated) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(day,grp) DO UPDATE SET msg_count=excluded.msg_count, "
+                "active_members=excluded.active_members, top_words=excluded.top_words, "
+                "pending_count=excluded.pending_count, updated=excluded.updated",
+                (day, grp, int(msg_count), int(active_members),
+                 str(top_words or "")[:200], int(pending_count), time.time()))
+
+    def daily_stats_list(self, day):
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM daily_stats WHERE day=? ORDER BY grp",
+                             (day,)).fetchall()
+            return [dict(r) for r in rows]
 
     # ---------- 成员画像 ----------
     def get_profile(self, grp, wxid):

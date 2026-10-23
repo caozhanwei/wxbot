@@ -27,7 +27,7 @@ def test_task_crud_and_due(tmp_path):
 
     now = _dt.datetime(2026, 10, 23, 21, 30).timestamp()
     with s._conn() as c:
-        c.execute("UPDATE group_tasks SET last_run=0")
+        c.execute("UPDATE group_tasks SET last_run=0, created_ts=1")
     due = s.due_tasks(now)
     assert [t["id"] for t in due] == [tid]
     due = s.due_tasks(now)

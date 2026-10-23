@@ -12,6 +12,7 @@ from . import group_logic, paths, personas
 from .kb import KBGateway
 from .config import BotConfig
 from .driver import WxDriver
+from .gate import Gate
 from .personas import PersonaEngine
 from .store import Store
 
@@ -79,6 +80,7 @@ class Bot:
         self.state.setdefault("no_at_last", {})
         self._last_sent_cache = {}    # display -> (text, ts) 防止同条消息短时间内连发刷屏
         self.watch = []
+        self.gate = Gate(self)        # 主动动作闸门（急件/日报等统一过闸）
 
     def _setup_ocr(self):
         setup = getattr(self.driver, "setup_ocr", None)
@@ -124,6 +126,25 @@ class Bot:
                 continue
             self.watch.append({"user": g["id"], "display": g.get("display") or g["id"],
                                "kind": "group", "cfg": g, "since": old.get(g["id"])})
+        # 非白名单私聊被动监控（只记录进补报缓存，绝不回复）
+        mp = self.cfg.app.get("missed_private")
+        if mp is not False and not (isinstance(mp, dict) and mp.get("enabled") is False):
+            known = {w["user"] for w in self.watch}
+            try:
+                recents = self.driver.list_recent_chats(limit=60)
+            except Exception as e:
+                log.warning("被动私聊发现失败: %s", e)
+                recents = []
+            for s in recents:
+                uid = s.get("id") or ""
+                if (s.get("is_group") or not uid or uid in known
+                        or uid == self.driver.self_id or uid.startswith("gh_")
+                        or (s.get("display") or "") == "文件传输助手"):
+                    continue
+                self.watch.append({"user": uid, "display": s.get("display") or uid,
+                                   "kind": "contact_passive", "cfg": {},
+                                   "since": old.get(uid)})
+                known.add(uid)
         for w in self.watch:
             if w["since"] is None:
                 w["since"] = self.driver.baseline(w["user"])
@@ -195,6 +216,12 @@ class Bot:
         max_replies = int(rc.get("max_replies", 0) or 0)
         max_runtime = int(rc.get("max_runtime_min", 0) or 0) * 60
         log.info("启动完成 dry_run=%s", self.cfg.dry_run)
+        from . import digest as _digest
+        from .scheduler import DailyJob, Scheduler
+        dd = self.cfg.app.get("daily_digest") or {}
+        self._scheduler = Scheduler(self, [
+            DailyJob("digest", int(dd.get("hour") or 21), fn=_digest.run_digest)])
+        self._scheduler.start()
         while True:
             if self.cfg.maybe_reload():
                 self.personas.refresh()
@@ -220,6 +247,8 @@ class Bot:
                     continue
                 if w["kind"] == "contact":
                     self._on_contact_msgs(w, msgs)
+                elif w["kind"] == "contact_passive":
+                    self._on_passive_msgs(w, msgs)
                 else:
                     self._on_group_msgs(w, msgs)
             self._maybe_auto_mine()
@@ -255,6 +284,15 @@ class Bot:
                 self.store.log("nontext", w["display"], m["sender_display"], m["type"])
         if texts and not self.state["paused"]:
             self._reply_contact(w, texts)
+
+    def _on_passive_msgs(self, w, msgs):
+        """被动私聊：只入补报缓存不回复；紧急词命中即时推送。"""
+        from . import digest
+        for m in msgs:
+            try:
+                digest.on_private_msg(self, w, m)
+            except Exception as e:
+                log.warning("被动私聊入库失败(%s): %s", w["display"], e)
 
     def _reply_contact(self, w, texts):
         from . import personas
@@ -352,6 +390,11 @@ class Bot:
                          w["display"], len(targets), stale_sec / 60.0)
             else:
                 self._group_qa(w, pick)
+            # 没被作答的@（被更新的@顶替/已过气）→ 补报入库
+            from . import digest
+            for m in targets:
+                if m is not pick:
+                    digest.record_at_missed(self, w, m)
             handled = {id(m) for m in targets}
         for m in msgs:
             if id(m) in handled:
@@ -367,6 +410,11 @@ class Bot:
             if m["type"] != "文本" or m["content"].startswith("<?xml"):
                 continue
             if self.state["paused"]:
+                # 暂停期间 @我 的消息也记补报，不错过
+                if group_logic.at_bot(m["content"], names) or \
+                        self.driver.self_id in (m.get("at_users") or []):
+                    from . import digest
+                    digest.record_at_missed(self, w, m)
                 continue
             word = None
             if mg.get("forbidden_words"):
@@ -797,14 +845,25 @@ class Bot:
 
     def _do_admin(self, name, args):
         if name in ("帮助", "help", ""):
-            return ("命令：#状态 #暂停 #恢复 #开 <名> #关 <名> #重载 #待审\n"
+            return ("命令：#状态 #暂停 #恢复 #补报 #急停主动 #恢复主动 "
+                    "#开 <名> #关 <名> #重载 #待审\n"
                     "（联系人/群名单与开关在 bot_config.yaml 或网页配置）")
         if name == "状态":
             ups = int(time.time() - self.state["start"])
             ws = ", ".join(f'{w["display"]}({"群" if w["kind"]=="group" else "私"})'
                            for w in self.watch) or "无"
+            gate = "，主动动作已急停" if self.gate.stopped else ""
             return (f"运行 {ups//60} 分钟，已发送 {self.state['sent']} 条，"
-                    f"{'已暂停' if self.state['paused'] else '正常'}\n监控: {ws}")
+                    f"{'已暂停' if self.state['paused'] else '正常'}{gate}\n监控: {ws}")
+        if name == "补报":
+            from . import digest
+            return digest.report_missed_now(self)
+        if name == "急停主动" or (name == "急停" and args[:1] == ["主动"]):
+            self.gate.stop()
+            return "已急停全部主动动作（急件/日报推送都停），#恢复主动 解除"
+        if name == "恢复主动" or (name == "恢复" and args[:1] == ["主动"]):
+            self.gate.resume()
+            return "已恢复主动动作"
         if name == "暂停":
             self.state["paused"] = True
             return "已暂停自动回复（管理员命令仍可用，#恢复 恢复）"

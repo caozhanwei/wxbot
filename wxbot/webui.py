@@ -483,6 +483,7 @@ details summary:hover{color:var(--primary)}
       <label><input type="checkbox" name="grounded" {{ 'checked' if (g.qa or {}).get('grounded_reply', True) }}> 带参考回复</label>
       <label><input type="checkbox" name="llm_fallback" {{ 'checked' if (g.qa or {}).get('llm_fallback') }}> 知识库断线走人设</label>
       <label><input type="checkbox" name="mine" {{ 'checked' if g.mine }}> 自动挖历史</label>
+      <label title="勾选后纳入每晚群精华日报（AI 热点摘要 + 未解问题 + 找你的事）"><input type="checkbox" name="digest_enabled" {{ 'checked' if (g.digest or {}).get('enabled') }}> 进日报</label>
       <label title="机器人每次在群里说的最多字数（@答疑与免@接话都生效），超出自动按句截短；0=不限">回复字数上限：<input type="number" name="max_reply_chars" value="{{ g.max_reply_chars or 0 }}" min="0" max="200" step="10" style="width:60px"> 字</label>
       <label title="这些人在群里 @机器人 就能下定时任务指令（如“每天晚上9点总结群消息”）。填微信昵称或群名片即可，不用知道 id，应用自动匹配；全局管理员和群主天然有权限">指令管理员：<input type="text" name="g_admins" value="{{ (g.admins or []) | join(', ') }}" style="width:170px" placeholder="填昵称，逗号分隔"></label>
       <span class="muted" style="margin-left:auto">@机器人提问触发；自动挖历史=定时把群聊增量抽成问答</span>
@@ -568,6 +569,48 @@ details summary:hover{color:var(--primary)}
     <button class="btn btn-primary">保存知识库</button>
   </form>
   <p class="muted" style="margin-top:6px">当前 Key 若过期会在日志区提示（HTTP 401）；可在群设置中勾选"知识库断线走人设"保障兜底。</p>
+</div>
+
+<!-- 运营驾驶舱 -->
+<a name="dash"></a>
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">运营驾驶舱</div>
+    <span class="card-subtitle">每群今日消息量 / 活跃 / 高频词 + 未解与待沉淀 + 日报状态；主动动作全过闸门审计{% if gate_stopped %}（<b style="color:#dc2626">已急停主动动作</b>）{% endif %}</span>
+  </div>
+  <div class="table-responsive">
+    <table>
+      <thead><tr><th>群</th><th>日报</th><th>今日消息</th><th>活跃人数</th><th>高频词</th><th>未解</th><th>已沉淀</th></tr></thead>
+      <tbody>
+      {% for d in dash %}
+      <tr>
+        <td><b>{{ d.name }}</b></td>
+        <td>{% if d.digest_done %}<span class="badge badge-success">已出</span>{% elif d.digest_on %}<span class="badge badge-warning">待出</span>{% else %}<span class="badge badge-neutral">未开启</span>{% endif %}</td>
+        <td>{{ d.msg_count }}</td>
+        <td>{{ d.active }}</td>
+        <td class="muted">{{ d.top_words or '—' }}</td>
+        <td>{{ d.pending }}</td>
+        <td>{{ d.mined }}</td>
+      </tr>
+      {% endfor %}
+      {% if not dash %}<tr><td colspan="7" class="muted" style="text-align:center">暂无启用的群</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="/cfg/app" class="row" style="padding:10px 0;border-top:1px dashed var(--border)">
+    <input type="hidden" name="scope" value="digest">
+    <label class="badge {{ 'badge-success' if digest_cfg.enabled else 'badge-warning' }}"><input type="checkbox" name="dd_enabled" {{ 'checked' if digest_cfg.enabled }}> 每晚群日报</label>
+    <label>发送时刻：<input type="number" name="dd_hour" value="{{ digest_cfg.hour or 21 }}" min="0" max="23" style="width:55px"> 点</label>
+    <label>推送到：<input type="text" name="dd_push_to" value="{{ digest_cfg.push_to or '文件传输助手' }}" style="width:130px"></label>
+    <button class="btn btn-primary">保存日报设置</button>
+    <span class="muted">错过开机时刻当天补发，跨天不补；发送时刻改动重启应用后生效</span>
+  </form>
+  <div class="row" style="padding-top:8px;border-top:1px dashed var(--border)">
+    <b>主动动作审计：</b>
+    {% if gate_logs %}
+      {% for l in gate_logs[:6] %}<span class="badge badge-neutral" style="margin:2px 4px 2px 0">{{ l.t }} {{ l.chat }}：{{ l.detail }}</span>{% endfor %}
+    {% else %}<span class="muted">暂无（日报 / 急件推送过闸后都会记在这里）</span>{% endif %}
+  </div>
 </div>
 
 <!-- 运行日志 -->
@@ -1057,6 +1100,26 @@ def start_web(bot):
                                       offset=(m_page - 1) * _PAGE_SIZE)
         for r in mined:
             r["grp_name"] = grp_names.get(r.get("grp")) or r.get("grp") or ""
+        # 驾驶舱：今日每群统计 + 日报水位 + 主动动作审计
+        day_today = time.strftime("%Y-%m-%d")
+        stats_by_grp = {r.get("grp"): r for r in bot.store.daily_stats_list(day_today)}
+        dash = []
+        for g in snap.get("groups") or []:
+            if not g.get("enabled"):
+                continue
+            gid = g.get("id") or ""
+            st = stats_by_grp.get(gid) or {}
+            dash.append({"name": g.get("display") or gid,
+                         "digest_on": bool((g.get("digest") or {}).get("enabled")),
+                         "digest_done": bot.store.digest_done_day(gid, day_today),
+                         "msg_count": st.get("msg_count") or 0,
+                         "active": st.get("active_members") or 0,
+                         "top_words": st.get("top_words") or "",
+                         "pending": bot.store.pending_issues_count(gid),
+                         "mined": bot.store.mined_count(gid)})
+        gate_logs = [l for l in logs if l.get("kind") == "gate"]
+        _gate = getattr(bot, "gate", None)
+        gate_stopped = bool(_gate and getattr(_gate, "stopped", False))
         return render_template_string(
             _PAGE, nav=_NAV,
             self_name=(driver.self_name if driver else "未连接"),
@@ -1093,6 +1156,8 @@ def start_web(bot):
             p_prev=(_href(p_page=p_page - 1) if p_page > 1 else ""),
             p_next=(_href(p_page=p_page + 1) if p_page < p_pages else ""),
             app_version=updater.current_version(),
+            dash=dash, gate_logs=gate_logs, gate_stopped=gate_stopped,
+            digest_cfg=((snap.get("app") or {}).get("daily_digest") or {}),
             update_mirror=(str((snap.get("app") or {}).get("update_mirror") or "").strip()
                            or updater.DEFAULT_MIRROR),
             update_check=_UPDATE_CHECK.get("res"),
@@ -1275,6 +1340,7 @@ def start_web(bot):
             "enabled": bool(f.get("enabled")),
             "persona": f.get("persona") or "通用朋友",
             "mine": bool(f.get("mine")),
+            "digest": {"enabled": bool(f.get("digest_enabled"))},
             "qa": {"enabled": bool(f.get("qa_enabled")),
                    "grounded_reply": bool(f.get("grounded")),
                    "llm_fallback": bool(f.get("llm_fallback"))},
@@ -1432,6 +1498,17 @@ def start_web(bot):
             if not admins:
                 return _render(form_error="管理员不能为空")
             bot.cfg.data["admins"] = admins
+            _persist()
+            return redirect("/")
+        if f.get("scope") == "digest":
+            appc = bot.cfg.data.setdefault("app", {})
+            dd = appc.setdefault("daily_digest", {})
+            dd["enabled"] = bool(f.get("dd_enabled"))
+            try:
+                dd["hour"] = max(0, min(23, int(f.get("dd_hour") or 21)))
+            except ValueError:
+                dd["hour"] = 21
+            dd["push_to"] = (f.get("dd_push_to") or "").strip() or "文件传输助手"
             _persist()
             return redirect("/")
         appc = bot.cfg.data.setdefault("app", {})
