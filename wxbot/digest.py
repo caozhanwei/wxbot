@@ -167,6 +167,7 @@ def run_digest(bot):
     if not groups and not bot.store.missed_unconsumed():
         return
     consumed = []
+    owner_header_done = False
     for w in groups:
         if bot.store.digest_done_day(w["user"], day):
             continue                     # 当天已出过（补跑幂等）
@@ -176,13 +177,22 @@ def run_digest(bot):
                 day, w["user"], msg_count=n_msg, active_members=active,
                 top_words=top,
                 pending_count=bot.store.pending_issues_count(grp=w["user"]))
-            header = f"📋 {day} 群日报" if w is groups[0] else ""
-            body = (header + "\n" if header else "") + text
+            to_group = bool((w["cfg"].get("digest") or {}).get("to_group"))
+            if to_group:                 # 群回顾直接发进群聊（群友可见）
+                target = w["display"]
+                body = (f"📋 {day} 群回顾\n"
+                        + (text.split("\n", 1)[1] if text.startswith("【") else text))
+            else:
+                target = push_to
+                body = text
+                if not owner_header_done:
+                    body = f"📋 {day} 群日报\n" + text
+                    owner_header_done = True
             g = _gate(bot)
-            ok, why = g.allow("digest", push_to, body) if g else (True, "ok")
+            ok, why = g.allow("digest", target, body) if g else (True, "ok")
             if ok:
-                if not bot.send(push_to, body, "digest"):
-                    bot.notify_admins(f"[告警] 日报推送到 {push_to} 失败（{w['display']} 小节）")
+                if not bot.send(target, body, "digest"):
+                    bot.notify_admins(f"[告警] 日报推送到 {target} 失败（{w['display']} 小节）")
             else:
                 log.warning("日报小节被闸门拦截(%s): %s", w["display"], why)
                 bot.store.digest_done(w["user"], day, last_seq)

@@ -63,13 +63,16 @@ def test_group_digest_checkbox_persists(client):
     c, bot, path = client
     base = {"idx": "0", "do": "save", "display": "测试群", "id": "111@chatroom",
             "enabled": "on", "persona": "老友幽默", "qa_enabled": "on", "grounded": "on"}
-    c.post("/cfg/group", data=dict(base, digest_enabled="on"), follow_redirects=True)
+    c.post("/cfg/group", data=dict(base, digest_enabled="on", digest_to_group="on"),
+           follow_redirects=True)
     data = _load(path)
     assert data["groups"][0]["digest"]["enabled"] is True
+    assert data["groups"][0]["digest"]["to_group"] is True
     # 再存一次不带勾选 → 关闭（幂等替换，不残留）
     c.post("/cfg/group", data=base, follow_redirects=True)
     data = _load(path)
     assert data["groups"][0]["digest"]["enabled"] is False
+    assert data["groups"][0]["digest"]["to_group"] is False
 
 
 def test_daily_digest_form_saves(client):

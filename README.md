@@ -76,6 +76,7 @@ python -m pytest tests/ -q               # 280+ 个用例
 - **#踢 二次确认**（v1.7.2）：管理员发 `#踢 昵称 [群名]` → 机器人回**证据预览**（TA 近期发言）→ `#确认踢` 才真正执行 UIA 自动移出（右键头像 →「移出群聊」→ 确认弹窗）；任何一步找不到入口立即放弃并提示人工路径，**绝不误伤**；确认令牌 5 分钟过期，dry_run 只演练；失败自动通知管理员改走群设置手动移出
 - **导航吸顶 + 欢迎语占位符容错**（v1.7.3）：网页控制台**标题栏+快捷导航药丸整体吸顶**，往下翻页随时能点导航跳转；进群欢迎语占位符 `{name}`/`$name$`/`$names$`/`%name%`/`{昵称}` 一律识别替换（此前配置里写 `$names$` 会原样发出去），文本里其它花括号也不再导致欢迎语发送失败
 - **吐槽收集 + 每日复盘**（v1.7.4）：自动收集群里/私聊/对话台里**对机器人的吐槽**（吐槽词命中 + 提到机器人/引用机器人消息双条件，防误捞吐槽别人的），每晚 21:45 LLM 归纳 **2~4 类共性问题 + 每类一条可落地优化建议**推给主人（`app.complaint_review`，只发一条不打扰群友）；LLM 挂了降级高频词简版；`#吐槽` 随时看吐槽原声
+- **群内定时回顾**（v1.7.5）：群配置 `digest.to_group` 勾上后，该群每天在日报时刻把**近 24 小时回顾总结（AI 热点摘要 + 未解问题）直接发进群聊**——群友"@机器人 每天晚上9点回顾总结群里发生的事情"这类诉求一键满足（网页群卡片「回顾发进群」开关）；照旧过闸门，其余群不受影响仍只发主人
 
 ## 配置要点（bot_config.yaml）
 
@@ -86,7 +87,7 @@ python -m pytest tests/ -q               # 280+ 个用例
 - `contacts`：`id`（微信号/wxid，不知道可只填 `display` 自动反查；更推荐直接从 Web 页"最近会话"点选）+ `persona` + `enabled`
 - `groups`：`--list` 查 id 或 Web 页点选；`admins` 按群添加指令管理员（填昵称即可）；`max_reply_chars` 回复字数上限（0=不限）；`qa.stale_min` @过气时限（分钟，默认 10）；`qa.enabled` 答疑开关；`no_at_reply` 免@接话（`no_at_context`/`no_at_cooldown_min` 可调，Web 页群卡片有开关）；`manage` 段配欢迎/违禁词/`warn_persona`/`warn_threshold`；`mention_names` 可加额外 @称呼（默认自动含自己的微信昵称）
 - `app.dry_run: true` 只记日志不发送（**模板默认开**，新装机先在演示模式验证）
-- `app.daily_digest`：每晚群精华日报（enabled/hour/push_to；群还要勾 `digest.enabled` 才出小节）
+- `app.daily_digest`：每晚群精华日报（enabled/hour/push_to；群还要勾 `digest.enabled` 才出小节；`digest.to_group` 让该群回顾直接发进群聊）
 - `app.weekly_report`：群活跃周报（enabled/weekday/hour/push_to；默认周一 9 点，开启后所有启用群都进周报）
 - `app.complaint_review`：吐槽复盘（enabled/hour/push_to；每晚自动 LLM 归纳对机器人的吐槽共性+优化建议，`#吐槽` 随时看原声）
 - `manage.order.ads_watch`：新成员广告嫌疑观察（默认开；告警附 #踢 指令，踢人需人工 #确认踢）

@@ -188,6 +188,39 @@ def test_run_digest_respects_disabled_group(tmp_path):
     assert not [r for r in bot.store.recent_logs(50) if r["kind"] == "digest"]
 
 
+# ---------- 群内定时回顾（digest.to_group） ----------
+
+def _g(display, gid, to_group=None):
+    dg = {"enabled": True}
+    if to_group is not None:
+        dg["to_group"] = to_group
+    return {"user": gid, "display": display, "kind": "group",
+            "cfg": {"id": gid, "display": display, "enabled": True, "digest": dg}}
+
+
+def test_run_digest_to_group_pushes_into_group(tmp_path):
+    bot = _FakeBot(tmp_path, groups=[_g("群甲", "111@chatroom", to_group=True)])
+    bot.store.add_missed("at", "群甲", "wxid_a", "阿强", "@机器人 怎么续费", NOW)
+    digest_mod.run_digest(bot)
+    rows = [r for r in bot.store.recent_logs(50) if r["kind"] == "digest"]
+    assert rows and rows[0]["chat"] == "群甲"            # 直接发进群聊
+    d = rows[0]["detail"] or ""
+    assert "群回顾" in d and "【群甲】" not in d          # 群内不重复群名头
+    assert "今日热点" in d and "怎么续费" in d            # 内容小节照常
+    assert bot.store.digest_done_day("111@chatroom", digest_mod._today())
+    assert bot.store.missed_unconsumed() == []           # @未答照常消化
+
+
+def test_run_digest_to_group_mixed(tmp_path):
+    bot = _FakeBot(tmp_path, groups=[_g("群甲", "111@chatroom", to_group=True),
+                                     _g("群乙", "222@chatroom", to_group=False)])
+    digest_mod.run_digest(bot)
+    rows = [r for r in bot.store.recent_logs(50) if r["kind"] == "digest"]
+    assert {r["chat"] for r in rows} == {"群甲", PUSH}   # 群甲进群、群乙推主人
+    owner = [r for r in rows if r["chat"] == PUSH][0]
+    assert "群日报" in (owner["detail"] or "") and "群乙" in (owner["detail"] or "")
+
+
 def test_report_missed_now(tmp_path):
     bot = _FakeBot(tmp_path)
     bot.store.add_missed("private", "李四", "wxid_b", "李四", "问方案定了没", NOW)

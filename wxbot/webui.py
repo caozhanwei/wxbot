@@ -483,6 +483,7 @@ details summary:hover{color:var(--primary)}
       <label><input type="checkbox" name="llm_fallback" {{ 'checked' if (g.qa or {}).get('llm_fallback') }}> 知识库断线走人设</label>
       <label><input type="checkbox" name="mine" {{ 'checked' if g.mine }}> 自动挖历史</label>
       <label title="勾选后纳入每晚群精华日报（AI 热点摘要 + 未解问题 + 找你的事）"><input type="checkbox" name="digest_enabled" {{ 'checked' if (g.digest or {}).get('enabled') }}> 进日报</label>
+      <label title="勾选后该群回顾在日报时刻直接发进群聊（群友可见），不发 push_to；需同时勾「进日报」"><input type="checkbox" name="digest_to_group" {{ 'checked' if (g.digest or {}).get('to_group') }}> 回顾发进群</label>
       <label title="机器人每次在群里说的最多字数（@答疑与免@接话都生效），超出自动按句截短；0=不限">回复字数上限：<input type="number" name="max_reply_chars" value="{{ g.max_reply_chars or 0 }}" min="0" max="200" step="10" style="width:60px"> 字</label>
       <label title="这些人在群里 @机器人 就能下定时任务指令（如“每天晚上9点总结群消息”）。填微信昵称或群名片即可，不用知道 id，应用自动匹配；全局管理员和群主天然有权限">指令管理员：<input type="text" name="g_admins" value="{{ (g.admins or []) | join(', ') }}" style="width:170px" placeholder="填昵称，逗号分隔"></label>
       <span class="muted" style="margin-left:auto">@机器人提问触发；自动挖历史=定时把群聊增量抽成问答</span>
@@ -1470,7 +1471,8 @@ def start_web(bot):
             "enabled": bool(f.get("enabled")),
             "persona": f.get("persona") or "通用朋友",
             "mine": bool(f.get("mine")),
-            "digest": {"enabled": bool(f.get("digest_enabled"))},
+            "digest": {"enabled": bool(f.get("digest_enabled")),
+                       "to_group": bool(f.get("digest_to_group"))},
             "qa": {"enabled": bool(f.get("qa_enabled")),
                    "grounded_reply": bool(f.get("grounded")),
                    "llm_fallback": bool(f.get("llm_fallback"))},

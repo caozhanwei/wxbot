@@ -44,6 +44,14 @@ def test_complaint_hits_quoted_bot_or_nickname():
     assert group_logic.complaint_hits("就这水平？答非所问") == []
 
 
+def test_complaint_hits_off_topic_words():
+    # 真实场景：群友吐槽"回答的牛头不对马嘴"此前漏收
+    assert group_logic.complaint_hits("@智能机器人 你看你，回答的牛头不对马嘴")
+    assert group_logic.complaint_hits("答得驴唇不对马嘴", quoted_bot=True)
+    assert group_logic.complaint_hits("这段文不对题", quoted_bot=True)
+    assert group_logic.complaint_hits("他说话不知所云") == []       # 没提机器人
+
+
 def test_complaint_hits_private_any_word():
     assert group_logic.complaint_hits("你答错了", private=True)
     assert group_logic.complaint_hits("今天好累", private=True) == []

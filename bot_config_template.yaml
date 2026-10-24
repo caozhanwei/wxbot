@@ -114,6 +114,7 @@ groups:
   mine: false                  # 自动增量挖掘群历史 → 网页"挖掘"区查看/导出
   digest:                      # 群精华日报（需 app.daily_digest.enabled 也开）
     enabled: false             # 勾选后该群每晚出小节：AI 热点摘要 + 未解问题 + @我未答
+    to_group: false            # 开后该群回顾在日报时刻直接发进群聊（群友可见），不发 push_to
   no_at_reply: false           # 免@接话：没人@机器人时也按最近聊天判断是否主动回复（默认关）
   active: false                # 活跃分子：免@不做“值不值得”智能判定，冷却一过就像群友一样自然接话（冷却仍节流）
   no_at_context: 20            # 免@判断参考的最近消息条数（含触发消息，默认 20）
