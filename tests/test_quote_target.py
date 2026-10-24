@@ -101,8 +101,8 @@ class _FakeUIA:
         self.last_sent = t
         return True
 
-    def quote_last_message(self, who, text, target_text=None):
-        self.calls.append((who, text, target_text))
+    def quote_last_message(self, who, text, target_text=None, target_name=None):
+        self.calls.append((who, text, target_text, target_name))
         return self.quote_ok
 
 
@@ -111,7 +111,7 @@ def test_driver_passes_target_content_to_uia():
     ok, why = d.send_quote("测试群", "三点开会", target_name="张三",
                            target_content="@群助手 几点开会")
     assert ok is True
-    assert d.uia.calls == [("测试群", "三点开会", "@群助手 几点开会")]
+    assert d.uia.calls == [("测试群", "三点开会", "@群助手 几点开会", "张三")]
 
 
 def test_driver_fallback_names_asker_not_others():
@@ -216,3 +216,39 @@ def test_restore_bottom_uses_newer_direction():
     del p.u._restore_chat_bottom   # 撤桩换回真实实现
     p.u._restore_chat_bottom()
     assert p.scrolled == [(-120, 40)]
+
+
+# ---------- 引用不错人：@前缀探针退化 + 昵称邻接校验 ----------
+
+def test_locate_quote_strips_mention_prefix():
+    """所有@消息共享"@机器人"前缀：不剥离会让"前6字"兜底命中任何人的@。"""
+    u = object.__new__(WeChatUIA)
+    items = [
+        ("电表在哪里看", 10, 300, 120, 20),          # 提问人原话（OCR 常丢@前缀）
+        ("@机器人 水表怎么读", 10, 500, 150, 20),     # 别人更新的@消息
+    ]
+    pt = u._locate_quote_point(items, "@机器人 电表在哪里看")
+    assert pt is not None and 300 <= pt[1] < 400      # 命中电表行（提问人那条）
+
+
+def test_locate_quote_prefers_name_adjacent_row():
+    """正文相近的两行：优先紧挨提问人昵称标签的那行，不再"同级取最新"。"""
+    u = object.__new__(WeChatUIA)
+    items = [
+        ("阿强", 60, 180, 40, 16),                    # 阿强的昵称标签
+        ("怎么读", 10, 200, 60, 16),                   # 阿强的消息（标签正下方）
+        ("怎么读", 10, 500, 60, 16),                   # 别人更靠下的相似消息
+    ]
+    pt = u._locate_quote_point(items, "水表怎么读", near_name="阿强")
+    assert pt is not None and pt[1] < 300
+
+
+def test_locate_quote_without_name_falls_back_to_newest():
+    """没给昵称（私聊/标签没识别到）：维持"同级取最新"，行为不回退。"""
+    u = object.__new__(WeChatUIA)
+    items = [
+        ("怎么读", 10, 200, 60, 16),
+        ("怎么读", 10, 500, 60, 16),
+    ]
+    pt = u._locate_quote_point(items, "水表怎么读")
+    assert pt is not None and pt[1] > 400

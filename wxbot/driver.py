@@ -345,7 +345,8 @@ class WxDriver:
         with self._send_lock:
             try:
                 if hasattr(self.uia, "quote_last_message"):
-                    if self.uia.quote_last_message(display, text, target_text=target_content):
+                    if self.uia.quote_last_message(display, text, target_text=target_content,
+                                                  target_name=target_name):
                         return True, "ok"
             except Exception as e:
                 log.warning("原生引用发送异常，降级发送: %s", e)

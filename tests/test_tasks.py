@@ -246,6 +246,29 @@ def test_irrelevant_question_not_parsed_as_task(tmp_path):
     assert b.store.list_tasks("111@chatroom") == []
 
 
+# ---------- "每日统计"一族：定时词/任务动词没识别导致答非所问（真实翻车） ----------
+
+def test_daily_stats_recognized_for_admin(tmp_path):
+    """管理员说"每日统计"：关键词闸门放行 → 建任务并答复（不再掉进知识库）。"""
+    llm = RoutingLLM(parse={"is_task": True, "action": "create", "freq": "daily",
+                            "hour": 20, "minute": 0, "desc": "每日群统计"})
+    b = _make_bot(tmp_path, llm)
+    assert b._maybe_task_command(b.watch[0], _msg("@伟 每日统计一下群里的活跃情况"))
+    tasks = b.store.list_tasks("111@chatroom")
+    assert len(tasks) == 1 and tasks[0]["hour"] == 20
+
+
+def test_daily_stats_nonadmin_deflected(tmp_path):
+    """非管理员说"每日统计"：明说没权限、指路群主/管理员，不硬答知识库。"""
+    llm = RoutingLLM()
+    b = _make_bot(tmp_path, llm)
+    m = _msg("@伟 每日统计一下群里的活跃情况", sender="wxid_a", name="阿强")
+    assert b._deflect_nonadmin_task(b.watch[0], m, "每日统计一下群里的活跃情况")
+    assert b.store.list_tasks("111@chatroom") == []
+    recs = [r for r in b.store.recent_logs(50) if r["kind"] == "qa"]
+    assert recs and "管理员" in recs[0]["detail"]
+
+
 def test_list_and_cancel(tmp_path):
     llm = RoutingLLM()
     b = _make_bot(tmp_path, llm)

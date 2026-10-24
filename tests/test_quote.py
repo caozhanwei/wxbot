@@ -65,7 +65,7 @@ def test_send_quote_fallback():
         def send_text(self, t):
             self.last_sent = t
             return True
-        def quote_last_message(self, who, t, target_text=None):
+        def quote_last_message(self, who, t, target_text=None, target_name=None):
             return False  # 模拟引用失败，应触发降级
 
     class StubDriver(driver.WeChatDriver):

@@ -1284,7 +1284,7 @@ class WeChatUIA:
     # ------------------------------------------------------------------ 引用定位
 
     @staticmethod
-    def _locate_quote_point(ocr_items, target_text: str):
+    def _locate_quote_point(ocr_items, target_text: str, near_name: str = None):
         """在 OCR 结果里按正文定位目标消息行，返回行内坐标 (cx, cy) 或 None。
 
         ocr_items: [(text, x, y, w, h), ...]（ScreenOCR.recognize 输出）。
@@ -1294,31 +1294,64 @@ class WeChatUIA:
           1 行文本包含 probe（目标前 12 字）
           2 包含 core（前 6 字，兜长消息换行拆行）
           3 包含 tail（结尾 12 字，兜开头被 OCR 弄脏）
-        同级取最底部（最新）命中。超短目标（<4 字）只允许开头精确命中。
+          4 行文本是目标的一段（OCR 只截到后半截时兜底）
+        同级先取紧挨 near_name 昵称标签的行（群聊昵称标签正下方就是本人
+        消息，防止撞上别人相似的插话），再取最底部（最新）命中。
+        超短目标（<4 字）只允许开头精确命中。
         """
-        t = re.sub(r"\s+", "", target_text or "")
+        # 群 @ 消息都以"@机器人"开头：不剥掉则 core 兜底会命中任何人的 @
+        raw_target = target_text or ""
+        raw = re.sub(r"^@\S{1,24}?[\s ]+", "", raw_target)
+        t = re.sub(r"\s+", "", raw)
+        t_full = re.sub(r"\s+", "", raw_target)
         if not t:
             return None
-        if len(t) < 4:
-            probes = [(0, t)]
-        else:
-            probe, core, tail = t[:12], t[:6], t[-12:]
-            probes = [(0, probe), (1, probe)]
+
+        def _mk(tt):
+            if len(tt) < 4:
+                return [(0, tt)]
+            probe, core, tail = tt[:12], tt[:6], tt[-12:]
+            ps = [(0, probe), (1, probe)]
             if len(core) >= 4:
-                probes.append((2, core))
-            if len(t) >= 8 and tail != probe:
-                probes.append((3, tail))
-        best = None   # ((level, -bottom), cx, cy)
+                ps.append((2, core))
+            if len(tt) >= 8 and tail != probe:
+                ps.append((3, tail))
+            return ps
+
+        probes = _mk(t)
+        if t != t_full:
+            # "@机器人 在吗"这类剥完只剩两三个字：并入未剥离探针（降2级兜底）
+            probes += [(lv + 2, p) for lv, p in _mk(t_full)]
+        name_bottoms = []
+        if near_name:
+            nn = re.sub(r"\s+", "", near_name)
+            if nn:
+                for text, x, y, w, h in ocr_items:
+                    n2 = re.sub(r"\s+", "", text or "")
+                    if n2 and nn in n2 and len(n2) <= len(nn) + 4:
+                        name_bottoms.append(y + h)
+
+        def _near(cy):
+            return any(0 <= cy - nb <= 90 for nb in name_bottoms)
+
+        best = None   # ((level, near?, -bottom), cx, cy)
         for text, x, y, w, h in ocr_items:
             n = re.sub(r"\s+", "", text or "")
             if not n:
                 continue
-            for level, p in probes:
-                if n.startswith(p) if level == 0 else (p in n):
-                    key = (level, -(y + h))
-                    if best is None or key < best[0]:
-                        best = (key, x + w // 2, y + h // 2)
+            level = None
+            for lv, p in probes:
+                if n.startswith(p) if lv == 0 else (p in n):
+                    level = lv
                     break
+            if level is None and len(t) >= 4 and len(n) >= 2 and n in t:
+                level = 4
+            if level is None:
+                continue
+            cx, cy = x + w // 2, y + h // 2
+            key = (level, 0 if _near(cy) else 1, -(y + h))
+            if best is None or key < best[0]:
+                best = (key, cx, cy)
         return (best[1], best[2]) if best else None
 
     def _ocr_message_area(self, lst):
@@ -1363,8 +1396,8 @@ class WeChatUIA:
         if lst is not None:
             self._wheel_list(lst, -120, 40, settle=0.03)
 
-    def _locate_message_pt(self, target_text: str,
-                           max_pages: int = 5) -> Optional[Tuple[int, int]]:
+    def _locate_message_pt(self, target_text: str, max_pages: int = 5,
+                           near_name: str = None) -> Optional[Tuple[int, int]]:
         """OCR 消息区按正文定位目标消息并右键它，返回坐标；失败 None。
 
         像人一样：可视区找不到就向上翻页再找（答题几十秒，提问那行
@@ -1380,7 +1413,8 @@ class WeChatUIA:
         scrolled = False
         for page in range(pages + 1):
             items = self._ocr_message_area(lst)
-            pt = self._locate_quote_point(items or [], target_text) if items else None
+            pt = self._locate_quote_point(items or [], target_text,
+                                          near_name=near_name) if items else None
             if pt is not None:
                 break
             if page >= pages:
@@ -1554,13 +1588,16 @@ class WeChatUIA:
         return False
 
     def quote_last_message(self, who: Optional[str] = None, text: str = "",
-                           target_text: Optional[str] = None) -> bool:
+                           target_text: Optional[str] = None,
+                           target_name: str = None) -> bool:
         """引用消息并输入发送内容。
 
         target_text 给定时按正文 OCR 定位那条消息再右键引用——答疑要几十秒，
         期间别人插话后"最新一行"已不是提问人那条，盲目引用最新一行会回错人；
         定位不到返回 False 交由上层降级（带 @提问人 前缀），绝不退回引最新。
-        省略 target_text 时保持旧行为：引用当前会话最新一条消息。
+        target_name（提问人昵称）给定时优先命中紧挨其昵称标签的行，正文
+        相近的别人插话不再被误引。省略 target_text 时保持旧行为：引用当前
+        会话最新一条消息。
         """
         if not self.ensure_window():
             return False
@@ -1568,7 +1605,7 @@ class WeChatUIA:
             if not self.open_chat(who):
                 return False
         if target_text:
-            pos = self._locate_message_pt(target_text)
+            pos = self._locate_message_pt(target_text, near_name=target_name)
         else:
             pos = self._right_click_latest_row(None)
         if pos is None:

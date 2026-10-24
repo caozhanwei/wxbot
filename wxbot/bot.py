@@ -473,7 +473,10 @@ class Bot:
         # @答疑优先且一批只答最新的一条：积压时旧@早已被群聊顶替，逐条回旧问题
         # 正是"舍近求远答老问题"的根因；超过过气时限的@直接跳过不再补答。
         handled = set()
-        targets = [m for m in msgs if qa.get("enabled") and _is_at_target(m)]
+        seen = self.state.setdefault("qa_seen", {}).setdefault(
+            w["user"], deque(maxlen=500))
+        targets = [m for m in msgs
+                   if qa.get("enabled") and _is_at_target(m) and m["seq"] not in seen]
         if targets:
             now = time.time()
             stale_sec = 60.0 * _num(qa.get("stale_min")
@@ -484,6 +487,7 @@ class Bot:
                 log.info("群答疑 %s: %d 条@均已超过 %.0f 分钟，视为过气跳过",
                          w["display"], len(targets), stale_sec / 60.0)
             else:
+                seen.append(pick["seq"])
                 self._group_qa(w, pick)
             # 没被作答的@（被更新的@顶替/已过气）→ 补报入库
             from . import digest
@@ -616,6 +620,47 @@ class Bot:
                 "、".join(t["theme"] for t in top) + "，@我问就行"
         self.send(w["display"], text, "welcome")
 
+    def _newer_at_same_user(self, w, m):
+        """只读窥探（不动水位）：本提问之后，同一发送者是否又@了新问题。
+
+        答题链路要数秒，期间提问人追发新@是常态——旧问题多半已被自己
+        顶替，答了就是"答的不是最后一次问的"。返回最新的那条@消息或 None。
+        """
+        try:
+            msgs, _ = self.driver.poll(w["user"], m.get("seq") or 0)
+        except Exception:
+            return None
+        if not msgs:
+            return None
+        names = self.driver.mention_names(w["cfg"])
+        best = None
+        for x in msgs:
+            if x.get("is_self") or x.get("type") != "文本":
+                continue
+            c = x.get("content") or ""
+            if not c or c.startswith("<?xml"):
+                continue
+            if not (group_logic.at_bot(c, names)
+                    or self.driver.self_id in (x.get("at_users") or [])):
+                continue
+            if x.get("sender") == m.get("sender"):
+                best = x
+        return best
+
+    def _supersede_if_newer(self, w, m):
+        """同用户更新@已到：旧问题记补报，改答最新（递归一次，新问题窥探无更新即正答）。"""
+        newer = self._newer_at_same_user(w, m)
+        if newer is None:
+            return False
+        from . import digest
+        log.info("群答疑 %s: %s 追发了新@，改答最新（旧问题转补报）",
+                 w["display"], m.get("sender_display") or m.get("sender"))
+        digest.record_at_missed(self, w, m)
+        self.state.setdefault("qa_seen", {}).setdefault(
+            w["user"], deque(maxlen=500)).append(newer["seq"])
+        self._group_qa(w, newer)
+        return True
+
     def _group_qa(self, w, m):
         g = w["cfg"]
         qa = g.get("qa") or {}
@@ -631,6 +676,9 @@ class Bot:
         if not question:
             self.send_quote(w["display"], "在呢在呢，有事直接说哈 [呲牙]",
                             target_name=asker, target_content=raw_msg_content)
+            return
+        # 该用户追发了新@？答最新那次问的（这里早退最省；答题途中还会再查一次）
+        if self._supersede_if_newer(w, m):
             return
         try:
             if self._maybe_task_command(w, m, question):
@@ -692,6 +740,9 @@ class Bot:
             ctx = []
         log.info("群答疑 %s: %s（独立问题: %s）", w["display"], question[:60], standalone[:60])
         self._refresh_profile_async(w, m["sender"], asker)
+        # 理解/检索这段时间里提问人追发了新@：丢弃本轮，改答最新
+        if self._supersede_if_newer(w, m):
+            return
         if not should:
             # 闲聊/玩笑/打趣@机器人：接地气幽默接话，坚决拒绝死板客服模板
             casual = self._diversified(
@@ -802,11 +853,12 @@ class Bot:
         return None
 
     # ---------- 群定时任务（群主/管理员 @机器人 固化指令） ----------
-    _TASK_KEYWORDS = ("总结", "提醒", "定时", "每天", "每周", "任务", "几点", "取消", "固定")
+    _TASK_KEYWORDS = ("总结", "提醒", "定时", "每天", "每日", "每周", "每月", "统计",
+                      "汇总", "任务", "几点", "取消", "固定")
     # 非管理员的"定时+任务动词"式请求（如"每天晚上9点回顾总结群里的事"）：
     # 不是知识问题，硬走答疑只会答非所问——礼貌指路群主/管理员（真实翻车现场）
-    _TASK_SCHED_RE = re.compile(r"每天|每晚|每周|定时|固定")
-    _TASK_VERB_RE = re.compile(r"总结|回顾|播报|日报|周报|提醒|报告")
+    _TASK_SCHED_RE = re.compile(r"每天|每晚|每周|每日|每月|定时|固定")
+    _TASK_VERB_RE = re.compile(r"总结|回顾|播报|日报|周报|提醒|报告|统计|汇总")
 
     def _is_task_admin(self, w, m):
         """谁能在本群对机器人发号施令：全局 admins ∪ 群配置 admins（填昵称自动匹配）∪ 群主。"""
