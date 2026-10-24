@@ -34,6 +34,10 @@ ROWS = {
     "222@chatroom": [
         _row("wxid_x", "路人", "wxid_x:\n别的群不相关", 1 * DAY, 10),
     ],
+    "filehelper": [
+        _row("wxid_me", "我", "刚才说错了，是明天停水", 300, 20),
+        _row("wxid_me", "我", "之前问过停水到几点", 900, 19),
+    ],
 }
 
 
@@ -65,10 +69,10 @@ class _LLM:
         self.terms_q = question
         return {"keywords": ["停水"], "who": "", "days": 30}
 
-    def chat_recall(self, question, lines):
+    def chat_recall(self, question, lines, recent=None):
         if self.boom_answer:
             raise RuntimeError("LLM 挂了")
-        self.answer_args = (question, list(lines))
+        self.answer_args = (question, list(lines), list(recent or []))
         return "阿强在【群甲】前天问过停水到几点（出自群聊记录）"
 
 
@@ -83,6 +87,7 @@ def _mk_bot(tmp_path, watch=None, llm=None):
             {"user": "111@chatroom", "display": "群甲", "kind": "group", "cfg": {}},
             {"user": "wxid_lin", "display": "林哥", "kind": "contact", "cfg": {}},
             {"user": "222@chatroom", "display": "群乙", "kind": "group", "cfg": {}},
+            {"user": "filehelper", "display": "文件传输助手", "kind": "console", "cfg": {}},
         ],
     })()
     return bot, llm
@@ -116,7 +121,7 @@ def test_answer_with_attribution(tmp_path):
     bot, llm = _mk_bot(tmp_path)
     out = recall_mod.answer(bot, "谁说过停水的事")
     assert "阿强" in out
-    q, lines = llm.answer_args
+    q, lines, recent = llm.answer_args
     assert q == "谁说过停水的事"
     assert any("【群甲】" in l and "阿强" in l for l in lines)
 
@@ -143,3 +148,51 @@ def test_extract_terms_naive_fallback(tmp_path):
     terms = recall_mod.extract_terms(bot, "群里谁问过 停水 的事？")
     assert "停水" in terms["keywords"] and terms["days"] >= 1
     assert terms["who"] == ""
+
+
+# ---------- 以最新为准：记录新到旧 + 对话台最近往来注入 ----------
+
+def test_answer_lines_newest_first(tmp_path):
+    """渲染给 LLM 的记录按时间新到旧：最新的那条排最前（不再关键词多者霸屏）。"""
+    bot, llm = _mk_bot(tmp_path)
+    recall_mod.answer(bot, "谁说过停水的事")
+    _, lines, _ = llm.answer_args
+    assert "物业门口" in lines[0]          # 1 天前的最新记录排第一
+    assert all("很久以前" not in l for l in lines)
+
+
+def test_answer_injects_recent_console_dialogue(tmp_path):
+    """对话台最近往来（号主刚说的纠正）必须进上下文，且最新一条排最前。"""
+    bot, llm = _mk_bot(tmp_path)
+    recall_mod.answer(bot, "谁说过停水的事")
+    _, _, recent = llm.answer_args
+    assert recent and "明天停水" in recent[0]
+
+
+class _Cfg:
+    llm_cfg = {}
+
+    def persona(self, name):
+        return {"style": "简洁口语化", "background": ""}
+
+
+def test_chat_recall_prompt_prioritizes_latest():
+    """Prompt 明说：当前问题最高优先，旧记录冲突时以号主最新说法为准。"""
+    from wxbot import personas
+    e = personas.PersonaEngine(_Cfg())
+    seen = {}
+
+    class FL:
+        def chat(self, system, user, temperature=0.3):
+            seen["system"], seen["user"] = system, user
+            return "明天停水，号主刚纠正过"
+
+    e._llm = FL()
+    out = e.chat_recall("到底哪天停水",
+                        ["【群甲】阿强(10-01 12:00): 停水到几点"],
+                        recent=["(刚刚) 刚才说错了，是明天停水"])
+    assert "明天停水" in out
+    assert "最高优先" in seen["system"]
+    assert "以号主最新说法为准" in seen["system"]
+    assert "最近的对话台往来" in seen["user"] and "明天停水" in seen["user"]
+    assert "新到旧" in seen["user"]

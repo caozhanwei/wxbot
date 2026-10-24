@@ -390,17 +390,27 @@ class PersonaEngine:
         return {"keywords": kws[:6], "who": str(d.get("who") or "").strip(),
                 "days": max(1, days)}
 
-    def chat_recall(self, question, lines):
-        """把检索到的聊天记录整合成带出处的口语化回答。"""
+    def chat_recall(self, question, lines, recent=None):
+        """把检索到的聊天记录整合成带出处的口语化回答。
+
+        号主当前这条问题最高优先：先弄清 TA 现在在问什么、是否在纠正
+        之前的说法；检索到的旧记录与最新说法冲突时以号主为准。
+        """
         p = self.cfg.persona("通用朋友")
         system = (
             f"你是号主的私人微信助手，说话风格：{p.get('style') or '简洁口语化'}。"
             "根据检索到的聊天记录回答号主的问题。"
+            "号主当前这条问题是最高优先级：先弄清 TA 现在到底在问什么、"
+            "有没有纠正或否定之前的说法；检索到的旧记录与号主最新说法冲突时，"
+            "一律以号主最新说法为准，别拿旧记录硬顶。"
             "必须带出处：谁说的、在哪个群/私聊、大概什么时间（用前天/上周这类相对说法）；"
             "口语化转述，别整段照抄；记录里没有的别编；"
             "行文别罗列全部记录，挑最相关的整合成 2~4 句话。"
         )
-        user = f"号主的问题：{question}\n\n检索到的记录：\n" + "\n".join(lines)
+        user = f"号主的问题：{question}\n\n"
+        if recent:
+            user += "最近的对话台往来（新到旧）：\n" + "\n".join(recent) + "\n\n"
+        user += "检索到的记录（新到旧，越靠前越新）：\n" + "\n".join(lines)
         raw = self.llm.chat(system, user, temperature=0.3)
         return _sanitize(raw)
 

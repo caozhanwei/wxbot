@@ -94,16 +94,45 @@ def search_history(bot, terms, limit_per_chat=800, max_rows=60):
     return out[:max_rows]
 
 
+def _recent_console_lines(bot, limit=8):
+    """对话台最近往来（新到旧）——号主刚说过的话必须进上下文，
+    否则检索出的旧记录会把最新说法淹没（翻旧账硬顶）。"""
+    for w in (bot.watch or []):
+        if w.get("kind") != "console":
+            continue
+        try:
+            rows = bot.driver.db.get_messages(w["user"], limit=limit) or []
+        except Exception:
+            return []
+        rows = sorted(rows, key=lambda r: -float(r.get("create_time") or 0))
+        out = []
+        for r in rows:
+            if (r.get("type") or "文本") != "文本":
+                continue
+            text = (r.get("content") or "").strip()
+            if not text or text.lstrip().startswith("<"):
+                continue
+            out.append(f"({_fmt_ts(r.get('create_time'))}) {text[:60]}")
+        return out[:limit]
+    return []
+
+
 def answer(bot, question):
-    """主人在对话台的自然提问 → 带出处（谁/哪群/大概时间）的整合回答。"""
+    """主人在对话台的自然提问 → 带出处（谁/哪群/大概时间）的整合回答。
+
+    号主最新这条问题永远最高优先：检索记录按新到旧喂给 LLM、
+    对话台最近往来一并注入，旧记录与最新说法冲突时以号主为准。
+    """
     terms = extract_terms(bot, question)
     rows = search_history(bot, terms)
     if not rows:
         return "没查到相关记录，换个关键词或说法再试试？"
+    rows = sorted(rows, key=lambda r: -float(r.get("ts") or 0))   # 新到旧
     lines = [f"【{r['chat']}】{r['sender_display']}({_fmt_ts(r['ts'])}): {r['content'][:80]}"
              for r in rows[:40]]
+    recent = _recent_console_lines(bot)
     try:
-        out = bot.personas.chat_recall(question, lines)
+        out = bot.personas.chat_recall(question, lines, recent=recent)
         return str(out or "").strip() or ("查到这些记录：\n" + "\n".join(lines[:10]))
     except Exception as e:
         log.warning("LLM 整合回答失败，机械列出兜底: %s", e)
