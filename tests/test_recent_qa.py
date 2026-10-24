@@ -167,7 +167,10 @@ def test_non_admin_cannot_command(bot):
         _msg("@群助手 每天晚上9点总结一下群里的消息",
              sender="wxid_a", name="阿强")])
     assert bot.store.list_tasks("111@chatroom") == []
-    assert bot._kb.asked                            # 普通问题照常走答疑
+    # 任务式请求不再硬答知识库（曾答非所问被吐槽），改为指路群主/管理员
+    recs = [r for r in bot.store.recent_logs(50) if r["kind"] == "qa"]
+    assert recs and "管理员" in recs[0]["detail"]
+    assert not bot._kb.asked
 
 
 def test_exact_nickname_admin_matches(bot):

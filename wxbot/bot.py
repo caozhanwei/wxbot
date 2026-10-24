@@ -3,6 +3,7 @@
 import logging
 import queue
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -611,6 +612,8 @@ class Bot:
                 return
         except Exception as e:
             log.warning("一句话操控处理异常(%s): %s", w["display"], e)
+        if self._deflect_nonadmin_task(w, m, question):
+            return
         rc = self.cfg.reply_cfg
         try:
             profile = (self.store.get_profile(w["user"], m["sender"]) or {}).get("profile") or ""
@@ -770,6 +773,10 @@ class Bot:
 
     # ---------- 群定时任务（群主/管理员 @机器人 固化指令） ----------
     _TASK_KEYWORDS = ("总结", "提醒", "定时", "每天", "每周", "任务", "几点", "取消", "固定")
+    # 非管理员的"定时+任务动词"式请求（如"每天晚上9点回顾总结群里的事"）：
+    # 不是知识问题，硬走答疑只会答非所问——礼貌指路群主/管理员（真实翻车现场）
+    _TASK_SCHED_RE = re.compile(r"每天|每晚|每周|定时|固定")
+    _TASK_VERB_RE = re.compile(r"总结|回顾|播报|日报|周报|提醒|报告")
 
     def _is_task_admin(self, w, m):
         """谁能在本群对机器人发号施令：全局 admins ∪ 群配置 admins（填昵称自动匹配）∪ 群主。"""
@@ -823,6 +830,25 @@ class Bot:
         if not parsed.get("is_task"):
             return False
         self._handle_task_cmd(w, m, parsed)
+        return True
+
+    def _deflect_nonadmin_task(self, w, m, question):
+        """非管理员想安排定时任务（每晚总结/定时提醒）：不硬答知识库，指路管理员。
+
+        群里真实翻过车：群友说"每天晚上9点回顾总结群里发生的事情"，
+        落到答疑链路后知识库检索出一堆不相干内容，答非所问被吐槽。
+        """
+        if self._is_task_admin(w, m):
+            return False
+        if not (self._TASK_SCHED_RE.search(question)
+                and self._TASK_VERB_RE.search(question)):
+            return False
+        asker = m.get("sender_display") or m.get("sender") or ""
+        self.send_quote(
+            w["display"],
+            "这事儿我一个人定不了哈，得群主或管理员发话～"
+            "让TA @我 说一声「每天晚上9点总结群消息」就能安排上 [抱拳]",
+            target_name=asker, target_content=m.get("content") or "", kind="qa")
         return True
 
     def _handle_task_cmd(self, w, m, parsed):

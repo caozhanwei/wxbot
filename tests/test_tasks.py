@@ -213,6 +213,32 @@ def test_normal_member_cannot_create(tmp_path):
     assert b.store.list_tasks("111@chatroom") == []
 
 
+# ---------- 非管理员的任务式请求：指路而非硬答 ----------
+
+def test_nonadmin_task_request_deflected(tmp_path):
+    b = _make_bot(tmp_path, RoutingLLM())
+    m = _msg("@伟 每天晚上9点回顾总结群里发生的事情", sender="wxid_a", name="阿强")
+    assert b._deflect_nonadmin_task(b.watch[0], m, "每天晚上9点回顾总结群里发生的事情")
+    recs = [r for r in b.store.recent_logs(50) if r["kind"] == "qa"]
+    assert recs and "管理员" in recs[0]["detail"]      # 指路话术
+
+
+def test_admin_task_request_not_deflected(tmp_path):
+    b = _make_bot(tmp_path, RoutingLLM())
+    m = _msg("@伟 每天晚上9点总结群里消息")            # wxid_admin 是管理员
+    assert not b._deflect_nonadmin_task(b.watch[0], m, "每天晚上9点总结群里消息")
+    assert not [r for r in b.store.recent_logs(50) if r["kind"] == "qa"]
+
+
+def test_daily_life_question_not_deflected(tmp_path):
+    b = _make_bot(tmp_path, RoutingLLM())
+    m = _msg("@伟 每天锻炼对身体好吗", sender="wxid_a", name="阿强")
+    assert not b._deflect_nonadmin_task(b.watch[0], m, "每天锻炼对身体好吗")
+    m2 = _msg("@伟 总结一下NETLIST怎么配", sender="wxid_a", name="阿强")
+    assert not b._deflect_nonadmin_task(b.watch[0], m2, "总结一下NETLIST怎么配")
+    assert not [r for r in b.store.recent_logs(50) if r["kind"] == "qa"]
+
+
 def test_irrelevant_question_not_parsed_as_task(tmp_path):
     llm = RoutingLLM(parse={"is_task": False})
     b = _make_bot(tmp_path, llm)
