@@ -20,7 +20,7 @@ from .store import Store
 
 log = logging.getLogger("wxbot")
 
-POLL_SEC_DEFAULT = 1.5   # 轮询间隔默认值（SQLCipher 增量读很轻，不必等 3 秒）
+POLL_SEC_DEFAULT = 1.0   # 轮询间隔默认值（SQLCipher 增量读很轻，反应快优先）
 
 _KB_SINK_MAX = 200       # 免@沉淀单次上传的最大消息条数（积压再多只保留最近这些）
 
@@ -71,6 +71,8 @@ class Bot:
         self.personas = PersonaEngine(self.cfg)
         self._kb = None
         self._kb_writer = None
+        self._watch_queues = {}       # user -> Queue：每会话一个 worker，慢链路互不拖累
+        self._wq_lock = threading.Lock()
         self.with_web = with_web
         # GUI 模式下与外壳共享同一对象，网页端看到的配置/暂停状态才是真实的
         self.state = state or {}
@@ -266,6 +268,33 @@ class Bot:
                 self.state["poll_fails"] = 0
                 if not msgs:
                     continue
+                self._dispatch(w, msgs)
+            self._maybe_auto_mine()
+            self._maybe_run_tasks()
+            _reminders.maybe_extract(self)
+            _reminders.maybe_fire(self)
+            _watchdog.maybe_check(self)
+            time.sleep(float(rc.get("poll_sec", POLL_SEC_DEFAULT)))
+
+    def _dispatch(self, w, msgs):
+        """消息入该会话专属队列，由常驻 worker 线程保序处理。
+
+        主循环只管轮询拉新（≤poll_sec 拾取），任何一个会话的慢链路
+        （LLM/KB 检索/UIA 发送）都不再拖住其他会话的应答。
+        """
+        with self._wq_lock:
+            q = self._watch_queues.get(w["user"])
+            if q is None:
+                q = queue.Queue()
+                self._watch_queues[w["user"]] = q
+                threading.Thread(target=self._watch_worker, args=(q,), daemon=True,
+                                 name="wxbot-w-" + (w["user"] or "")[-16:]).start()
+        q.put((w, msgs))
+
+    def _watch_worker(self, q):
+        while True:
+            w, msgs = q.get()
+            try:
                 if w["kind"] == "contact":
                     self._on_contact_msgs(w, msgs)
                 elif w["kind"] == "contact_passive":
@@ -274,12 +303,8 @@ class Bot:
                     self._on_console_msgs(w, msgs)
                 else:
                     self._on_group_msgs(w, msgs)
-            self._maybe_auto_mine()
-            self._maybe_run_tasks()
-            _reminders.maybe_extract(self)
-            _reminders.maybe_fire(self)
-            _watchdog.maybe_check(self)
-            time.sleep(float(rc.get("poll_sec", POLL_SEC_DEFAULT)))
+            except Exception as e:
+                log.exception("处理 %s 消息异常: %s", w.get("display"), e)
 
     def _maybe_auto_mine(self):
         """配置了 mine 的群，定时增量挖掘历史入本地知识池。"""
@@ -360,7 +385,12 @@ class Bot:
     def _reply_contact(self, w, texts):
         from . import personas
         rc = self.cfg.reply_cfg
-        time.sleep(float(rc.get("quiesce_sec", 5)))          # 合并连发
+        # 连发合并等待：只对"刚发完、可能还在连发"的人生效；
+        # 消息已静默超过窗口就立即处理，不再白等
+        last_ts = max((float(m.get("ts") or 0) for m in texts), default=0.0)
+        wait = float(rc.get("quiesce_sec", 5)) - (time.time() - last_ts)
+        if wait > 0:
+            time.sleep(wait)
         more, w["since"] = self.driver.poll(w["user"], w["since"])
         for m in more:
             if (not m["is_self"] and m["type"] == "文本"
@@ -977,7 +1007,7 @@ class Bot:
             return
         if not context:
             return
-        self._sink_to_kb(w)
+        self._sink_to_kb_async(w)
         active = bool(w["cfg"].get("active"))
         if not active and not self._judge_no_at(w, context):
             return
@@ -998,6 +1028,22 @@ class Bot:
             sent = self.send(w["display"], text, "no_at")
         if sent:
             marks[w["user"]] = time.time()
+
+    def _sink_to_kb_async(self, w):
+        """KB 沉淀丢后台线程：提炼+逐条入库常要十几秒，绝不占应答路径；
+        同群进行中直接跳过，避免并发重入重复提炼同一段消息。"""
+        marks = self.state.setdefault("sink_running", {})
+        if marks.get(w["user"]):
+            return
+        marks[w["user"]] = True
+
+        def _job():
+            try:
+                self._sink_to_kb(w)
+            finally:
+                marks[w["user"]] = False
+        threading.Thread(target=_job, daemon=True,
+                         name="wxbot-sink-" + (w["user"] or "")[-16:]).start()
 
     def _sink_to_kb(self, w):
         """把水位线后的新群消息（_SENSITIVE 过滤后）提炼成问答对写入知识库；失败静默降级待重试。"""

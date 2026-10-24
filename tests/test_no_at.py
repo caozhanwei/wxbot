@@ -154,6 +154,16 @@ def _logs(bot, kind):
     return [r for r in bot.store.recent_logs(50) if r["kind"] == kind]
 
 
+def _wait(cond, timeout=3.0):
+    """KB 沉淀已后台异步执行，等它落地再断言。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_no_at_triggers_reply_and_sinks(bot):
     llm = FakeLLM(sink_items=[{"q": "用户手册在哪", "a": "已发群里"}])
     bot.personas._llm = llm
@@ -161,13 +171,14 @@ def test_no_at_triggers_reply_and_sinks(bot):
     assert llm.judged == 1 and llm.chatted == 1
     recs = _logs(bot, "no_at")
     assert len(recs) == 1 and "NETLIST_FILE" in recs[0]["detail"]
-    # 沉淀：LLM 抽问答 → kb_add_qa 入库；卡号行已在送模型前被滤掉
+    # 沉淀（后台线程）：LLM 抽问答 → kb_add_qa 入库；卡号行已在送模型前被滤掉
+    assert _wait(lambda: bot._kb_writer.calls)
     assert bot._kb_writer.calls == [("用户手册在哪", "已发群里", "来源群：老司机养成记")]
     assert llm.sink_seen and "6222021234567890123" not in llm.sink_seen[0]
     # 回复前确实检索了知识库参考
     assert bot._kb.searched
     # 水位线推进；冷却已登记
-    assert bot.store.get_kb_seq(GROUP) == 3
+    assert _wait(lambda: bot.store.get_kb_seq(GROUP) == 3)
     assert bot.state["no_at_last"][GROUP] > 0
 
 
@@ -257,7 +268,7 @@ def test_active_mode_skips_judge_and_replies(tmp_path):
     assert llm.judged == 0                   # 活跃分子：不做值不值得判定
     assert llm.chatted == 1                  # 照样自然接话
     assert len(_logs(b, "no_at")) == 1
-    assert b.store.get_kb_seq(GROUP) == 3    # 沉淀照跑（空抽取也推进水位）
+    assert _wait(lambda: b.store.get_kb_seq(GROUP) == 3)   # 沉淀照跑（空抽取也推进水位）
     assert b.state["no_at_last"][GROUP] > 0
     # 冷却照常节流：冷却期内不再接话
     b._on_group_msgs(b.watch[0], [_msg("还有呢", seq=11)])

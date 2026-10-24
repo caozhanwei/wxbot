@@ -151,8 +151,8 @@ def test_kb_prefetch_failure_falls_back(tmp_path):
 
 # ---------- 默认轮询间隔 ----------
 
-def test_poll_default_1_5s():
-    assert float(POLL_SEC_DEFAULT) == 1.5
+def test_poll_default_1s():
+    assert float(POLL_SEC_DEFAULT) == 1.0
 
 
 # ---------- LLM 空回复重试加大预算 ----------

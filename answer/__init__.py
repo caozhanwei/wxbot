@@ -29,6 +29,9 @@ class McpKBClient:
         self.kb = mcp.get("kb", "team")
         self.top_k = int(mcp.get("top_k", 5))
         self.timeout = int(mcp.get("timeout", 60))
+        # 应答检索快速失败秒数：答疑等不了 RAG 慢响应，超时走兜底；
+        # 写入类（add_qa/upload）仍用长超时（多为后台线程，慢点无妨）
+        self.ask_timeout = int(mcp.get("ask_timeout", 8))
         self.miss_markers = mcp.get("miss_markers") or [
             "未查询到", "无法回答", "没有找到", "未找到相关", "未提及", "无相关内容", "未提供"]
         self._initialized = False
@@ -37,7 +40,7 @@ class McpKBClient:
     def ready(self) -> bool:
         return bool(self.url and self.key)
 
-    def _rpc(self, method, params=None, id_=1) -> dict:
+    def _rpc(self, method, params=None, id_=1, timeout=None) -> dict:
         payload = {"jsonrpc": "2.0", "id": id_, "method": method}
         if params is not None:
             payload["params"] = params
@@ -46,7 +49,7 @@ class McpKBClient:
             headers={"Authorization": f"Bearer {self.key}",
                      "Content-Type": "application/json",
                      "Accept": "application/json, text/event-stream"},
-            json=payload, timeout=self.timeout)
+            json=payload, timeout=timeout or self.timeout)
         if r.status_code != 200:
             raise KBError(f"HTTP {r.status_code}: {r.text[:200]}")
         for line in r.text.splitlines():
@@ -65,9 +68,10 @@ class McpKBClient:
             self._rpc("initialize", _INIT["params"], id_=0)
             self._initialized = True
 
-    def _call_tool(self, name, arguments):
+    def _call_tool(self, name, arguments, timeout=None):
         self._ensure_init()
-        d = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        d = self._rpc("tools/call", {"name": name, "arguments": arguments},
+                      timeout=timeout)
         result = d.get("result", {})
         parts = result.get("content") or []
         text = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
@@ -78,7 +82,8 @@ class McpKBClient:
     def ask(self, question: str, room: str = ""):
         """RAG 问答。返回 (answer, hit, grounded)：
         hit=正中；grounded=带引用来源（即使含"未提及"等字样，答案仍有参考价值）。"""
-        text = self._call_tool("kb_ask", {"query": question, "kb": self.kb, "top_k": self.top_k})
+        text = self._call_tool("kb_ask", {"query": question, "kb": self.kb, "top_k": self.top_k},
+                               timeout=self.ask_timeout)
         if not text:
             raise KBError("kb_ask 返回空")
         hit = not any(m in text for m in self.miss_markers)
@@ -86,4 +91,5 @@ class McpKBClient:
         return text, hit, grounded
 
     def search(self, query: str, top_k: int = 5) -> str:
-        return self._call_tool("kb_search", {"query": query, "kb": self.kb, "top_k": top_k})
+        return self._call_tool("kb_search", {"query": query, "kb": self.kb, "top_k": top_k},
+                               timeout=self.ask_timeout)

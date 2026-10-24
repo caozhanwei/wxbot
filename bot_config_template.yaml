@@ -56,6 +56,7 @@ kb:                              # 知识库（可选）：群 @机器人 答疑
   # upload_tool: kb_upload    # 免@消息沉淀的上传工具名（可选；默认 kb_upload → kb_add_document → kb_add_file 顺序试探）
   top_k: 5
   timeout: 60
+  ask_timeout: 8                  # 应答检索快速失败秒数：答疑等不了慢 RAG，超时走兜底；写入类仍用上面的 timeout
   miss_markers:
   - 未查询到
   - 无法回答

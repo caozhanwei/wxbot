@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 
 from wechatauto.db import WeChatDB
@@ -46,6 +47,10 @@ def parse_refer_msg(raw_content: str):
 
 
 class WxDriver:
+    # UIA 物理互斥（进程级）：微信窗口只有一个，多会话 worker 并发时发送必须串行。
+    # 放类级：绕过 __init__ 的桩对象也能安全加锁。
+    _send_lock = threading.RLock()
+
     def __init__(self):
         self.db = WeChatDB()
         self.uia = WeChatUIA()
@@ -314,36 +319,38 @@ class WxDriver:
     # ---------- 发送 ----------
     def send_text(self, display, text):
         """安全发送：open_chat → 硬校验会话 → 粘贴比对回车，重试 _SEND_ATTEMPTS 次。"""
-        why = "未尝试"
-        for _ in range(_SEND_ATTEMPTS):
-            try:
-                if self.uia.open_chat(display):
-                    time.sleep(0.8)
-                    cur = self.uia.current_chat() or ""
-                    if display not in cur:
-                        why = f"会话校验失败: {cur!r}"
-                    elif self.uia.send_text(text):
-                        return True, "ok"
+        with self._send_lock:
+            why = "未尝试"
+            for _ in range(_SEND_ATTEMPTS):
+                try:
+                    if self.uia.open_chat(display):
+                        time.sleep(0.8)
+                        cur = self.uia.current_chat() or ""
+                        if display not in cur:
+                            why = f"会话校验失败: {cur!r}"
+                        elif self.uia.send_text(text):
+                            return True, "ok"
+                        else:
+                            why = "send_text 返回 False"
                     else:
-                        why = "send_text 返回 False"
-                else:
-                    why = "open_chat 返回 False"
-            except Exception as e:
-                why = f"异常: {type(e).__name__}: {e}"
-            time.sleep(3)
-        return False, f"{why}（重试{_SEND_ATTEMPTS}次后放弃）"
+                        why = "open_chat 返回 False"
+                except Exception as e:
+                    why = f"异常: {type(e).__name__}: {e}"
+                time.sleep(3)
+            return False, f"{why}（重试{_SEND_ATTEMPTS}次后放弃）"
 
     def send_quote(self, display, text, target_name="", target_content=""):
         """带气泡引用发送：按提问正文定位那条消息（答题慢、期间别人插话
         也不引错人），定位不到降级为带 @提问人 前缀的普通发送。"""
-        try:
-            if hasattr(self.uia, "quote_last_message"):
-                if self.uia.quote_last_message(display, text, target_text=target_content):
-                    return True, "ok"
-        except Exception as e:
-            log.warning("原生引用发送异常，降级发送: %s", e)
-        prefix = f"「回复 @{target_name}」" if target_name else "「引用回复」"
-        return self.send_text(display, f"{prefix} {text}")
+        with self._send_lock:
+            try:
+                if hasattr(self.uia, "quote_last_message"):
+                    if self.uia.quote_last_message(display, text, target_text=target_content):
+                        return True, "ok"
+            except Exception as e:
+                log.warning("原生引用发送异常，降级发送: %s", e)
+            prefix = f"「回复 @{target_name}」" if target_name else "「引用回复」"
+            return self.send_text(display, f"{prefix} {text}")
 
     def kick_member(self, display, member, probe=""):
         """移出群成员（登录号需为群主/管理员）。任何一步失败返回 False。
